@@ -6,15 +6,13 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"io/ioutil"
 	"time"
 
+	"github.com/GetStream/stream-go"
 	"github.com/gin-gonic/gin"
-	"github.com/antonholmquist/jason"
-	"golang.org/x/oauth2"
 	"github.com/pborman/uuid"
 	"database/sql"
-	//_ "github.com/mattn/go-sqlite3"
+	"strings"
 )
 
 type AccessToken struct {
@@ -23,12 +21,10 @@ type AccessToken struct {
 }
 
 type User struct {
-	ID          int64
-	UUID        string
-	Username    string
-	FacebookID  string
-	FacebookImg string
-	UserToken   UserToken
+	ID       int64
+	UUID     string
+	Email    string
+	Username string
 }
 
 type UserToken struct {
@@ -39,41 +35,56 @@ type UserToken struct {
 var router *gin.Engine
 var DB *sql.DB
 
+// Stream.io variables
+var client *getstream.Client
+var globalFeed *getstream.FlatFeed
+
 func main() {
-	// "mobile-backend.db"
+
+	// database setup
 	DB, err := sql.Open("sqlite3", "/tmp/getstream-mobile-backend.db")
 	if err != nil {
 		panic("failed to connect database")
 	}
 	defer DB.Close()
 
+	// GetStream.io setup
+
+	client, err = getstream.New(&getstream.Config{
+		APIKey:      os.Getenv("STREAM_API_KEY"),
+		APISecret:   os.Getenv("STREAM_API_SECRET"),
+		AppID:       os.Getenv("STREAM_APP_ID"),
+		Location:    os.Getenv("STREAM_REGION"),
+	})
+	if err != nil {
+		panic("failed to connect to stream")
+	}
+	globalFeed, err = client.FlatFeed("user", "")
+	if err != nil {
+		panic("could not set global feed")
+	}
+
+	// gin routing
+
 	gin.SetMode(gin.DebugMode)
 	router = gin.Default()
 	router.LoadHTMLGlob("templates/*")
 
-	router.GET("/", func(c *gin.Context) {
+	router.Static("/", "index.html")
+	router.GET("/src", func(c *gin.Context) {
 		// redirect to the repo, blog post, etc.
 		c.Redirect(http.StatusTemporaryRedirect, "//github.com/GetStream")
 	})
-	router.GET("/_ah_health", func(c *gin.Context) {
+	router.GET("/blog", func(c *gin.Context) {
 		// redirect to the repo, blog post, etc.
-		c.HTML(http.StatusOK, "healthcheck.html", gin.H{"title": "ok"})
+		c.Redirect(http.StatusTemporaryRedirect, "//getstream.io/blog")
 	})
-	router.GET("/privacy", func(c *gin.Context) {
+	router.GET("/healthcheck", func(c *gin.Context) {
 		// redirect to the repo, blog post, etc.
-		c.HTML(http.StatusOK, "privacy.html", gin.H{})
+		c.HTML(http.StatusOK, "healthcheck.html", gin.H{})
 	})
-	router.GET("/termsofservice", func(c *gin.Context) {
-		// redirect to the repo, blog post, etc.
-		c.HTML(http.StatusOK, "termsofservice.html", gin.H{})
-	})
-	router.GET("/ping", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"message": "pong",
-		})
-	})
-
-	//////// custom endpoints here
+	router.Static("/privacy", "privacy.html")
+	router.Static("/termsofservice", "termsofservice.html")
 
 	router.GET("/user/:username", func(c *gin.Context) {
 		name := c.Param("username")
@@ -83,87 +94,163 @@ func main() {
 		})
 	})
 
-	router.GET("/follow/:source/:target", func(c *gin.Context) {
-		//sourceFeedName := c.Param("sourceName")
-		//targetFeedName := c.Param("targetName")
+	router.GET("/follow/:target", getFollow)
 
-		// validate that sourceUuid and targetUuid are valid
-		// source follows target, pull 100 items into their feed
+	router.GET("/login", getLogin)
+	router.POST("/login", postLogin)
+	router.GET("/register", getRegister)
+	router.POST("/register", postRegister)
+	router.POST("/upload", postPhotoUpload)
 
-		c.JSON(http.StatusOK, gin.H{
-			"status": "success",
-		})
-	})
-
-	router.GET("/register", fbRegister)
-	router.GET("/FBLogin", fbLogin)
-	router.POST("/upload", process_upload)
-
-	///////// no more custom code under here
+	// no more custom code under here
 	log.Print("Listening on port 8080")
 	router.Run()
 }
 
-func process_upload(c *gin.Context) {
-	file, header, err := c.Request.FormFile("upload")
-	filename := header.Filename
-	fmt.Println(header.Filename)
-	out, err := os.Create("./tmp/" + filename + ".png")
-	if err != nil {
-		log.Fatal(err)
+func getFollow(c *gin.Context) {
+	//sourceFeedName := c.Param("sourceName")
+	//targetFeedName := c.Param("targetName")
+
+	// validate that sourceUuid and targetUuid are valid
+	// source follows target, pull 100 items into their feed
+
+	c.JSON(http.StatusOK, gin.H{
+		"status": "success",
+	})
+}
+
+func postPhotoUpload(c *gin.Context) {
+	// create copy to be used inside the goroutine
+	cCp := c.Copy()
+	go func() { // handle upload in the background
+		username := cCp.PostForm("username")
+		file, header, err := c.Request.FormFile("upload")
+		filename := header.Filename
+		log.Println(header.Filename)
+		out, err := os.Create("./tmp/" + filename + ".png")
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer out.Close()
+		_, err = io.Copy(out, file)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// shrink image
+		// push to S3, get URL
+		// send image url, date, username to stream
+
+
+
+		// note that you are using the copied context "cCp", IMPORTANT
+		log.Println("Done! in path " + cCp.Request.URL.Path)
+
+	}()
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+func getRegister(c *gin.Context) {
+	c.HTML(http.StatusOK, "register.html", gin.H{})
+}
+
+func postRegister(c *gin.Context) {
+	var user *User
+
+	email := c.PostForm("email")
+	username := c.PostForm("username")
+
+	var output []string
+
+	if username == "" || email == "" {
+		if username == "" {
+			output = append(output, "Username cannot be blank")
+		}
+		if email == "" {
+			output = append(output, "Email cannot be blank")
+		}
+	} else {
+		log.Println("checking username uniqueness")
+		rows, err := DB.Query(`
+			SELECT u.id, u.uuid. u.email, u.username FROM users u WHERE u.username=? OR u.email=?
+			LIMIT 1
+			`, strings.ToLower(username), strings.ToLower(email))
+		if err != nil {
+			log.Println("error getting user details for username", username)
+			c.JSON(http.StatusInternalServerError, err.Error())
+			return
+		}
+		for rows.Next() {
+			var userId int = -1
+			err = rows.Scan(&userId)
+			if userId > -1 {
+				output = append(output, "Username or Email already used")
+			}
+		}
 	}
-	defer out.Close()
-	_, err = io.Copy(out, file)
-	if err != nil {
-		log.Fatal(err)
-	}
-}
 
-var fbConfig = &oauth2.Config{
-	// ClientId: FBAppID(string), ClientSecret : FBSecret(string)
-	// Example - ClientId: "1234567890", ClientSecret: "red2drdff6e2321e51aedcc94e19c76ee"
-
-	ClientID:     "196848327415282",
-	ClientSecret: "903969cabc53ba4d51fbb81fa36d310e",
-	RedirectURL:  "http://getstream-mobile.appspot.com/FBLogin",
-	Scopes:       []string{"email", "user_about_me"},
-	Endpoint: oauth2.Endpoint{
-		AuthURL:  "https://www.facebook.com/dialog/oauth",
-		TokenURL: "https://graph.facebook.com/oauth/access_token",
-	},
-}
-
-func fbRegister(c *gin.Context) {
-	url := fbConfig.AuthCodeURL("")
-	c.HTML(http.StatusOK, "facebook.html", gin.H{"facebook_url": url})
-}
-
-func fbLogin(c *gin.Context) {
-	code := c.Query("code")
-	log.Println("incoming code: " + code)
-
-	accessToken, err := fbConfig.Exchange(oauth2.NoContext, code)
-	if err != nil {
-		c.String(http.StatusInternalServerError, err.Error())
+	if len(output) > 0 {
+		c.HTML(http.StatusOK, "register.html", gin.H{"errors": output})
 		return
 	}
 
-	fbCheckLogin(c, accessToken, "")
+	log.Println("saving new user in db")
+	// save user details in the db
+	stmt, err := DB.Prepare(`
+			INSERT INTO users (uuid, email, username, created_at, updated_at)
+			VALUES (?,?,?,?,?,?,?)`,
+	)
+	if err != nil {
+		panic(fmt.Sprintf("could create user insert statement, %v", err))
+	}
+	_, err = stmt.Exec(
+		uuid.New(),
+		user.Email,
+		user.Username,
+		time.Now(),
+		time.Now(),
+	)
+	if err != nil {
+		panic("failed to run user insert statement")
+	}
+
+	//affect, err := res.RowsAffected()
+	//if err != nil {
+	//	panic("failed to run rows affected after user insert")
+	//}
+	//log.Println("rows affected:", affect)
+	//
+	//user.ID, err = res.LastInsertId()
+	//if err != nil {
+	//	panic("failed to get last_insert_id")
+	//}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
 
-func fbCheckLogin(c *gin.Context, accessToken *oauth2.Token, username string) {
-	var user *User
-	log.Println("accessToken:", accessToken)
-	log.Println("username:", username)
+func getLogin(c *gin.Context) {
+	c.HTML(http.StatusOK, "register.html", gin.H{})
+}
 
-	if username != "" {
-		log.Println("looking up username", username)
+func postLogin(c *gin.Context) {
+	var output []string
+	var userUUID string
+
+	email := c.PostForm("email")
+	username := c.PostForm("username")
+
+	if username == "" || email == "" {
+		if username == "" {
+			output = append(output, "Username cannot be blank")
+		}
+		if email == "" {
+			output = append(output, "Email cannot be blank")
+		}
+	} else {
 		rows, err := DB.Query(`
-			SELECT u.id, u.uuid. u.facebook_id, u.username, u.profile_image, ut.token, ut.expiry
-			FROM users u
-			JOIN user_tokens ut ON u.id=ut.uid
+			SELECT u.UUID FROM users u WHERE u.username=? AND u.email=?
 			LIMIT 1
-			`)
+			`, strings.ToLower(username), strings.ToLower(email))
 		if err != nil {
 			log.Println("error getting user details for username", username)
 			c.JSON(http.StatusInternalServerError, err.Error())
@@ -171,15 +258,8 @@ func fbCheckLogin(c *gin.Context, accessToken *oauth2.Token, username string) {
 		}
 		for rows.Next() {
 			err = rows.Scan(
-				&user.ID,
-				&user.UUID,
-				&user.FacebookID,
-				&user.Username,
-				&user.FacebookImg,
-				&user.UserToken.Token,
-				&user.UserToken.Expiry,
+				&userUUID,
 			)
-			log.Println(user)
 			if err != nil {
 				log.Println("error putting user details into struct")
 				c.JSON(http.StatusInternalServerError, err.Error())
@@ -188,123 +268,6 @@ func fbCheckLogin(c *gin.Context, accessToken *oauth2.Token, username string) {
 		}
 	}
 
-	log.Println("pinging facebook with access token")
-	response, err := http.Get("https://graph.facebook.com/me?access_token=" + accessToken.AccessToken)
-	if err != nil {
-		log.Println("error getting graph using access token")
-		c.JSON(http.StatusInternalServerError, err.Error())
-		return
-	}
-	contents, err := ioutil.ReadAll(response.Body)
-	if err != nil {
-		log.Println("error reading response from Facebook")
-		c.JSON(http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	// see https://www.socketloop.com/tutorials/golang-process-json-data-with-jason-package
-	userPayload, _ := jason.NewObjectFromBytes([]byte(contents))
-
-	user.Username, err = userPayload.GetString("username")
-	if err != nil {
-		log.Println(err)
-	}
-	user.FacebookID, err = userPayload.GetString("id")
-	if err != nil {
-		log.Println(err)
-	}
-	user.FacebookImg = "https://graph.facebook.com/" + user.FacebookID + "/picture?width=180&height=180"
-
-	log.Println("new user:", user)
-	if username == "" {
-		log.Println("saving new user in db")
-		// save user details in the db
-		stmt, err := DB.Prepare(`
-				INSERT INTO users (uuid, username, facebook_id, profile_image, created_at, updated_at)
-				VALUES (?,?,?,?,?,?,?)`,
-		)
-		if err != nil {
-			panic(fmt.Sprintf("could create user insert statement, %v", err))
-		}
-		res, err := stmt.Exec(
-			uuid.New(),
-			user.Username,
-			user.FacebookID,
-			user.FacebookImg,
-			time.Now(),
-			time.Now(),
-		)
-		if err != nil {
-			panic("failed to run user insert statement")
-		}
-
-		affect, err := res.RowsAffected()
-		if err != nil {
-			panic("failed to run rows affected after user insert")
-		}
-		log.Println("rows affected:", affect)
-
-		user.ID, err = res.LastInsertId()
-		if err != nil {
-			panic("failed to get last_insert_id")
-		}
-
-		stmt, err = DB.Prepare("INSERT INTO user_facebook_token (uid, created_at, updated_at) VALUES (?,?,?)")
-		if err != nil {
-			panic(fmt.Sprintf("could create token insert statement, %v", err))
-		}
-		res, err = stmt.Exec(user.ID, time.Now(), time.Now())
-		if err != nil {
-			panic("failed to run token insertstatement")
-		}
-
-		affect, err = res.RowsAffected()
-		if err != nil {
-			panic("failed to run rows affected after user token insert")
-		}
-		log.Println("rows affected:", affect)
-
-		user.UserToken.Token = accessToken.AccessToken
-		user.UserToken.Expiry = accessToken.Expiry
-	} else {
-		stmt, err := DB.Prepare(`UPDATE users SET username=?, profile_image=?, updated_at=? WHERE facebook_id=?`,
-		)
-		if err != nil {
-			panic(fmt.Sprintf("could create user update statement, %v", err))
-		}
-		res, err := stmt.Exec(
-			user.Username,
-			user.FacebookImg,
-			user.FacebookID,
-			time.Now(),
-		)
-		if err != nil {
-			panic("failed to run user insert statement")
-		}
-		affect, err := res.RowsAffected()
-		if err != nil {
-			panic("failed to run rows affected after user update")
-		}
-		log.Println("rows affected:", affect)
-	}
-	stmt, err := DB.Prepare("UPDATE user_facebook_token SET token=?, expiry=? WHERE uid=?")
-	if err != nil {
-		panic(fmt.Sprintf("could create token update statement, %v", err))
-	}
-	res, err := stmt.Exec(user.UserToken.Token, user.UserToken.Expiry, user.ID)
-	if err != nil {
-		panic("failed to run statement")
-	}
-	affect, err := res.RowsAffected()
-	if err != nil {
-		panic("failed to run rows affected after user token update")
-	}
-	log.Println("rows affected:", affect)
-
-	c.HTML(http.StatusOK, "facebook_user.html", gin.H{
-		"fb_id": user.FacebookID,
-		"username": user.Username,
-		"fb_img": user.FacebookImg,
-	})
-	// see https://www.socketloop.com/tutorials/golang-download-file-example on how to save FB file to disk
+	c.JSON(http.StatusOK, gin.H{"UUID": userUUID})
+	return
 }
