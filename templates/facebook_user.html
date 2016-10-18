@@ -1,0 +1,10 @@
+{{ template "header.html" .}}
+
+new code<br/>
+Username {{ .username }}<br/>
+ID is {{ .fb_id }}<br/>
+email is {{ .email }}<br/>
+profile img:<br/>
+<img src="{{ .fb_img }}" />
+
+{{ template "footer.html" .}}
