@@ -44,7 +44,7 @@ type UserToken struct {
 var router *gin.Engine
 var DB *sql.DB
 var S3Client *s3.S3
-const S3BucketName string = "getstream-example"
+var S3BucketName string = "getstream-example"
 
 // Stream.io variables
 var client *getstream.Client
@@ -112,15 +112,9 @@ func main() {
 	router.Static("/privacy", "privacy.html")
 	router.Static("/termsofservice", "termsofservice.html")
 
-	router.GET("/user/:username", func(c *gin.Context) {
-		name := c.Param("username")
-		// get user stream, send back in json format
-		c.JSON(http.StatusOK, gin.H{
-			"username": name,
-		})
-	})
-
+	router.GET("/feed/:uuid", getFeed)
 	router.GET("/follow/:target", getFollow)
+	router.GET("/unfollow/:target", getUnfollow)
 
 	router.GET("/login", getLogin)
 	router.POST("/login", postLogin)
@@ -141,13 +135,88 @@ func main() {
 	router.Run(":3000")
 }
 
+func getFeed (c *gin.Context) {
+	userUUID := c.Param("userUUID")
+	lastUUID := c.Param("lastUUID")
+	// get user stream, send back in json format
+	userFeed, err := client.FlatFeed("user", userUUID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"error": err.Error(),
+		})
+	}
+	var options getstream.GetFlatFeedInput
+	options.Limit = 50
+	if lastUUID != "" {
+		options.IDGT = lastUUID
+	}
+	activities, err := userFeed.Activities(&options)
+
+	c.JSON(http.StatusOK, gin.H{
+		"uuid": userUUID,
+		"feed": activities,
+	})
+}
+
 func getFollow(c *gin.Context) {
-	//sourceFeedName := c.Param("sourceName")
-	//targetFeedName := c.Param("targetName")
+	userUUID := c.Query("uuid")
+	if userUUID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user UUID not found"})
+		return
+	}
 
-	// validate that sourceUuid and targetUuid are valid
-	// source follows target, pull 100 items into their feed
+	followUUID := c.Param("target")
+	if followUUID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "target feed UUID not found"})
+		return
+	}
 
+	userFeed, err := client.FlatFeed("user", userUUID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	}
+
+	targetFeed, err := client.FlatFeed("user", followUUID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	}
+
+	userFeed.FollowFeedWithCopyLimit(targetFeed, 50)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status": "success",
+	})
+}
+
+func getUnfollow(c *gin.Context) {
+	userUUID := c.Query("uuid")
+	if userUUID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user UUID not found"})
+		return
+	}
+
+	unfollowUUID := c.Param("target")
+	if unfollowUUID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "target feed UUID not found"})
+		return
+	}
+
+	userFeed, err := client.FlatFeed("user", userUUID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	}
+
+	targetFeed, err := client.FlatFeed("user", unfollowUUID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	}
+
+	userFeed.Unfollow(targetFeed)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"status": "success",
 	})
