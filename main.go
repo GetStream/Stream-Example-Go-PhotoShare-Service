@@ -2,13 +2,13 @@ package main
 
 import (
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
 	"time"
 	"database/sql"
 	"strings"
+	"bytes"
 
 	"github.com/GetStream/stream-go"
 
@@ -20,8 +20,9 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/awsutil"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/service/s3")
+	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go/aws/session"
+)
 
 type AccessToken struct {
 	Token  string
@@ -42,7 +43,7 @@ type UserToken struct {
 
 var router *gin.Engine
 var DB *sql.DB
-var S3 string
+var S3Client *s3.S3
 const S3BucketName string = "getstream-example"
 
 // Stream.io variables
@@ -75,22 +76,20 @@ func main() {
 	}
 
 	// S3
-	creds := credentials.NewSharedCredentials("/.credentials", "default")
-	_, err = creds.Get()
+	//Endpoint:         "s3.amazonaws.com"
+	//S3ForcePathStyle: true
+	S3Client = s3.New(session.New(&aws.Config{Region: aws.String("us-east-1")}))
+	_, err = S3Client.CreateBucket(&s3.CreateBucketInput{
+		Bucket: &S3BucketName,
+	})
 	if err != nil {
-		panic(err)
+		log.Println("Failed to create bucket", err)
+		return
 	}
-	aws.DefaultConfig.Region = "us-east-1"
-	config := &aws.Config{
-		Region:           "",
-		Endpoint:         "s3.amazonaws.com", // <-- forking important !
-		S3ForcePathStyle: true, // <-- without these lines. All will fail! fork you aws!
-		Credentials:      creds,
-		LogLevel:         0, // <-- feel free to crank it up
+	if err = S3Client.WaitUntilBucketExists(&s3.HeadBucketInput{Bucket: &S3BucketName}); err != nil {
+		log.Printf("Failed to wait for bucket to exist %s, %s\n", S3BucketName, err)
+		return
 	}
-
-	S3 := s3.New(config)
-	S3 = S3
 
 	// gin routing
 
@@ -164,26 +163,63 @@ func postPhotoUpload(c *gin.Context) {
 		// handle upload in the background
 		userUUID := cCp.PostForm("uuid")
 		_, header, err := c.Request.FormFile("upload")
-		filename := header.Filename
 		log.Println(header.Filename)
-		out, err := os.Create("./tmp/" + filename + ".png")
+		localFilename := "./tmp/" + uuid.New() + ".png"
+		localSavedFile, err := os.Create(localFilename)
 		if err != nil {
 			log.Fatal(err)
 		}
-		photoFilename = uuid.New() + ".png"
-		_, err = io.Copy(out, photoFilename)
-		if err != nil {
-			log.Fatal(err)
-		}
-		out.Close()
+		localSavedFile.Close()
 
 		// shrink image
-		dstImage := imaging.Resize(out, 1024, 768, imaging.Lanczos)
+		inImage, err := imaging.Open(localFilename)
+		if err != nil {
+			panic(err)
+		}
+		dstImage := imaging.Resize(inImage, 1024, 768, imaging.NearestNeighbor)
+		imaging.Save(dstImage, photoFilename)
 
 		// push to S3, get URL
-		file, err := os.Open()
+		file, err := os.Open(localFilename)
+		if err != nil {
+			panic(err)
+		}
+		defer file.Close()
+		fileInfo, _ := file.Stat()
+		var size int64 = fileInfo.Size()
+		buffer := make([]byte, size)
+		file.Read(buffer)
+		fileBytes := bytes.NewReader(buffer) // convert to io.ReadSeeker type
+		fileType := http.DetectContentType(buffer)
+		path := "photos/" + file.Name()
+		params := &s3.PutObjectInput{
+			Bucket:        aws.String(S3BucketName), // required
+			Key:           aws.String(path),       // required
+			ACL:           aws.String("public-read"),
+			Body:          fileBytes,
+			ContentLength: &size,
+			ContentType:   aws.String(fileType),
+			Metadata: map[string]*string{
+				"Key": aws.String("MetadataValue"), //required
+			},
+			// see more at http://godoc.org/github.com/aws/aws-sdk-go/service/s3#S3.PutObject
+		}
+		result, err := S3Client.PutObject(params)
+		if err != nil {
+			if awsErr, ok := err.(awserr.Error); ok {
+				fmt.Println(awsErr.Code(), awsErr.Message(), awsErr.OrigErr())
+				if reqErr, ok := err.(awserr.RequestFailure); ok {
+					// A service error occurred
+					fmt.Println(reqErr.Code(), reqErr.Message(), reqErr.StatusCode(), reqErr.RequestID())
+				}
+			} else {
+				// This case should never be hit, the SDK should always return an
+				// error which satisfies the awserr.Error interface.
+				fmt.Println(err.Error())
+			}
+		}
+		fmt.Println(awsutil.StringValue(result))
 		photoURL = "https://dvqg2dogggmn6.cloudfront.net/images/stream_logo.svg"
-
 
 		// send image url, date, username to stream
 
