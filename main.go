@@ -25,6 +25,9 @@ import (
 	//"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/jinzhu/gorm"
 	"strings"
+	"io"
+	"path"
+	"github.com/aws/aws-sdk-go/aws/session"
 )
 
 type User struct {
@@ -44,7 +47,7 @@ type Photo struct {
 
 var router *gin.Engine
 var S3Client *s3.S3
-var S3BucketName string = "getstream-example"
+var S3BucketName string = "android-demo"
 
 type FeedItem struct {
 	ID          string `json:"id"`
@@ -95,7 +98,7 @@ func initStream() *getstream.Client {
 		Location:    os.Getenv("STREAM_REGION"),
 	})
 	if err != nil {
-		panic("failed to connect to stream")
+		panic("failed to connect to stream: " + err.Error())
 	}
 	globalFeed, err = client.FlatFeed("user", "global")
 	if err != nil {
@@ -108,18 +111,7 @@ func main() {
 	// S3
 	//Endpoint:         "s3.amazonaws.com"
 	//S3ForcePathStyle: true
-	//S3Client = s3.New(session.New(&aws.Config{Region: aws.String("us-east-1")}))
-	//_, err = S3Client.CreateBucket(&s3.CreateBucketInput{
-	//	Bucket: &S3BucketName,
-	//})
-	//if err != nil {
-	//	log.Println("Failed to create bucket", err)
-	//	return
-	//}
-	//if err = S3Client.WaitUntilBucketExists(&s3.HeadBucketInput{Bucket: &S3BucketName}); err != nil {
-	//	log.Printf("Failed to wait for bucket to exist %s, %s\n", S3BucketName, err)
-	//	return
-	//}
+	S3Client = s3.New(session.New(&aws.Config{Region: aws.String("us-east-1")}))
 
 	// gin routing
 
@@ -280,10 +272,14 @@ func postPhotoUpload(c *gin.Context) {
 		return
 	}
 
-	_, header, err := c.Request.FormFile("upload")
+	file, header, err := c.Request.FormFile("upload")
 	log.Println(header.Filename)
 	localFilename := "./tmp/" + uuid.New() + ".png"
 	localSavedFile, err := os.Create(localFilename)
+	if err != nil {
+		log.Fatal(err)
+	}
+	_, err = io.Copy(localSavedFile, file)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -315,6 +311,7 @@ func postPhotoUpload(c *gin.Context) {
 	cCp := c.Copy()
 	go func() {
 		log.Println("doing upload etc in the background")
+		log.Println("local filename:", localFilename)
 		var photoFilename string
 
 		// shrink image
@@ -335,11 +332,13 @@ func postPhotoUpload(c *gin.Context) {
 
 		fileInfo, _ := file.Stat()
 		var size int64 = fileInfo.Size()
+		log.Println("file size", size)
 		buffer := make([]byte, size)
 		file.Read(buffer)
 		fileBytes := bytes.NewReader(buffer) // convert to io.ReadSeeker type
 		fileType := http.DetectContentType(buffer)
-		path := "photos/" + file.Name()
+		path := "photos/" + path.Base(file.Name())
+		log.Println("s3.PutObjectInput")
 		params := &s3.PutObjectInput{
 			Bucket:        aws.String(S3BucketName), // required
 			Key:           aws.String(path), // required
@@ -352,6 +351,8 @@ func postPhotoUpload(c *gin.Context) {
 			},
 			// see more at http://godoc.org/github.com/aws/aws-sdk-go/service/s3#S3.PutObject
 		}
+		log.Println(params)
+		log.Println("s3.PutObject")
 		result, err := S3Client.PutObject(params)
 		if err != nil {
 			if awsErr, ok := err.(awserr.Error); ok {
@@ -359,16 +360,19 @@ func postPhotoUpload(c *gin.Context) {
 				if reqErr, ok := err.(awserr.RequestFailure); ok {
 					// A service error occurred
 					fmt.Println(reqErr.Code(), reqErr.Message(), reqErr.StatusCode(), reqErr.RequestID())
+					log.Println(reqErr.Code(), reqErr.Message(), reqErr.StatusCode(), reqErr.RequestID())
 				}
 			} else {
 				// This case should never be hit, the SDK should always return an
 				// error which satisfies the awserr.Error interface.
+				log.Println("s3.PutObject err:", err.Error())
 				fmt.Println(err.Error())
 			}
 		}
+		log.Println("s3.PutObject finished")
 		fmt.Println(awsutil.StringValue(result))
 		// we need to get the S3 URL from that result somehow
-		photo.URL = "http://unknown.image"
+		photo.URL = "https://android-demo.s3.amazonaws.com/" + path
 
 		_, err = dbmap.Exec(`
 		UPDATE photos SET URL=?, UpdatedAt=? WHERE ID=?`,
