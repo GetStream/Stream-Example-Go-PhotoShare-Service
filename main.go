@@ -294,7 +294,7 @@ func postPhotoUpload(c *gin.Context) {
 	photo.UserID = user_id
 
 	insert, err := dbmap.Exec(`
-		INSERT INTO photos (uuid, user_id, CreatedAt, UpdatedAt)
+		INSERT INTO photos (UUID, UserID, CreatedAt, UpdatedAt)
 		VALUES (?, ?, ?, ?)`,
 		photo.UUID, user_id, time.Now(), time.Now())
 	if err != nil {
@@ -302,7 +302,7 @@ func postPhotoUpload(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"errors": err.Error()})
 		return
 	}
-	_, err = insert.LastInsertId()
+	photo_id, err := insert.LastInsertId()
 	if err == nil {
 		log.Println("sending user payload response")
 		c.JSON(http.StatusCreated, gin.H{"uuid": photo.UUID, "status": "processing"})
@@ -367,9 +367,17 @@ func postPhotoUpload(c *gin.Context) {
 			}
 		}
 		fmt.Println(awsutil.StringValue(result))
+		// we need to get the S3 URL from that result somehow
 		photo.URL = "http://unknown.image"
 
-		// send image url, date, username to stream
+		_, err = dbmap.Exec(`
+		UPDATE photos SET URL=?, UpdatedAt=? WHERE ID=?`,
+			photo.URL, time.Now(), photo_id)
+		if err != nil {
+			log.Println("sending error after photo insert")
+			c.JSON(http.StatusBadRequest, gin.H{"errors": err.Error()})
+			return
+		}
 
 		now := time.Now()
 		userFeed, err := StreamClient.FlatFeed("user", userUUID)
