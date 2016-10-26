@@ -22,3 +22,10 @@ CREATE TABLE photos
   CONSTRAINT photos_userid___fk FOREIGN KEY (user_id) REFERENCES users (id)
 );
 CREATE INDEX photos_userid___fk ON photos (user_id);
+
+CREATE TABLE follows
+(
+  id INT(11) PRIMARY KEY NOT NULL AUTO_INCREMENT,
+  user_id_1 INT(11),
+  user_id_2 INT(11)
+);

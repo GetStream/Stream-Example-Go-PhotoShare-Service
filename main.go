@@ -32,17 +32,17 @@ import (
 
 type User struct {
 	gorm.Model
-	UUID      string `gorm:"column:uuid" json:"uuid"`
-	Username  string `gorm:"column:username" json:"username"`
-	Email     string `gorm:"column:email" json:"email"`
+	UUID     string `gorm:"column:uuid" json:"uuid"`
+	Username string `gorm:"column:username" json:"username"`
+	Email    string `gorm:"column:email" json:"email"`
 }
 
 type Photo struct {
 	gorm.Model
-	UserID    int  `gorm:"column:user_id,index" json:"user_id"`
-	UUID      string `gorm:"column:uuid" json:"uuid"`
-	URL       string `gorm:"column:url" json:"url"`
-	Likes     int `gorm:"column:likes" json:"likes"`
+	UserID int  `gorm:"column:user_id,index" json:"user_id"`
+	UUID   string `gorm:"column:uuid" json:"uuid"`
+	URL    string `gorm:"column:url" json:"url"`
+	Likes  int `gorm:"column:likes" json:"likes"`
 }
 
 var router *gin.Engine
@@ -88,6 +88,8 @@ func initDb() *gorp.DbMap {
 var StreamClient = initStream()
 // Stream.io variables
 var globalFeed *getstream.FlatFeed
+var aggregatedFeed *getstream.AggregatedFeed
+var notificationFeed *getstream.NotificationFeed
 
 func initStream() *getstream.Client {
 	// GetStream.io setup
@@ -103,6 +105,14 @@ func initStream() *getstream.Client {
 	globalFeed, err = client.FlatFeed("user", "global")
 	if err != nil {
 		panic("could not set global feed")
+	}
+	aggregatedFeed, err = client.AggregatedFeed("aggregated", "photos")
+	if err != nil {
+		panic("could not set aggregated feed")
+	}
+	notificationFeed, err = client.NotificationFeed("notification", "likes")
+	if err != nil {
+		panic("could not set notification feed")
 	}
 	return client
 }
@@ -183,12 +193,47 @@ func getFeed(c *gin.Context) {
 	if lastUUID != "" {
 		options.IDGT = lastUUID
 	}
-	activities, err := userFeed.Activities(&options)
+	feedActivities, err := userFeed.Activities(&options)
+	var activities []FeedItem
+	var newestActivityUUID string
+
+	for idx, activity := range feedActivities.Activities {
+		if idx == 0 {
+			newestActivityUUID = activity.ID
+		}
+		var user User
+		bits := strings.Split(string(activity.Actor), ":")
+		actor := bits[1]
+		err := dbmap.SelectOne(&user, "SELECT users.* FROM users WHERE uuid=?", actor)
+		if err != nil {
+			log.Println(err.Error())
+			continue
+		}
+		if activity.MetaData["photoUrl"] == "http://unknown.image" {
+			continue
+		}
+		log.Println("actor", activity.Actor)
+		log.Println("id", activity.ID)
+		log.Println("object", activity.Object)
+		log.Println("target", activity.Target)
+		log.Println("origin", activity.Origin)
+		log.Println("data", activity.Data)
+		log.Println("metadata", activity.MetaData)
+		activities = append(activities, FeedItem{
+			AuthorEmail: user.Email,
+			AuthorID: user.UUID,
+			AuthorName: user.Username,
+			PhotoURL: activity.MetaData["photoUrl"],
+			ID: activity.ForeignID,
+			CreatedDate: activity.TimeStamp.Format("2006-01-02T15:04:05.999999"),
+		})
+	}
 
 	log.Println("returning activities")
 
 	c.JSON(http.StatusOK, gin.H{
 		"uuid": userUUID,
+		"newest_activity_id": newestActivityUUID,
 		"feed": activities,
 	})
 }
@@ -206,19 +251,69 @@ func getFollow(c *gin.Context) {
 		return
 	}
 
-	userFeed, err := StreamClient.FlatFeed("user", userUUID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	var user User
+	var uid1 uint = 0
+	var uid2 uint = 0
+	err := dbmap.SelectOne(&user, "SELECT users.* FROM users WHERE uuid=?", userUUID)
+	if err != nil && err.Error() != "sql: no rows in result set" {
+		log.Println(err.Error())
+		c.JSON(http.StatusInternalServerError, err.Error())
+		return
+	}
+	if user.ID > 0 {
+		uid1 = user.ID
+	}
+	err = dbmap.SelectOne(&user, "SELECT users.* FROM users WHERE uuid=?", followUUID)
+	if err != nil && err.Error() != "sql: no rows in result set" {
+		log.Println(err.Error())
+		c.JSON(http.StatusInternalServerError, err.Error())
+		return
+	}
+	if user.ID > 0 {
+		uid2 = user.ID
+	}
+	if uid1 <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "your UUID was not valid"})
+		return
+	}
+	if uid2 <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "follow UUID was not valid"})
+		return
 	}
 
-	targetFeed, err := StreamClient.FlatFeed("user", followUUID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	var follow_id uint = 0
+	err = dbmap.SelectOne(&follow_id, "SELECT id FROM follows WHERE user_id_1=? AND user_id_2=?", uid1, uid2)
+	if err != nil && err.Error() != "sql: no rows in result set" {
+		log.Println(err.Error())
+		c.JSON(http.StatusInternalServerError, err.Error())
+		return
 	}
+	if follow_id <= 0 {
 
-	userFeed.FollowFeedWithCopyLimit(targetFeed, 50)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		_, err = dbmap.Exec(`INSERT INTO follows (user_id_1, user_id_2) VALUES (?, ?)`, uid1, uid2)
+		if err != nil {
+			log.Println("sending error after insert")
+			c.JSON(http.StatusBadRequest, gin.H{"errors": err.Error()})
+			return
+		}
+
+		userFeed, err := StreamClient.FlatFeed("user", userUUID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		targetFeed, err := StreamClient.FlatFeed("user", followUUID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+
+		userFeed.FollowFeedWithCopyLimit(targetFeed, 50)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"status": "success",
@@ -241,17 +336,51 @@ func getUnfollow(c *gin.Context) {
 	userFeed, err := StreamClient.FlatFeed("user", userUUID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 
 	targetFeed, err := StreamClient.FlatFeed("user", unfollowUUID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
 
 	userFeed.Unfollow(targetFeed)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
 	}
+
+	var user User
+	var uid1, uid2 uint
+	err = dbmap.SelectOne(&user, "SELECT users.* FROM users WHERE uuid=?", userUUID)
+	if err != nil && err.Error() != "sql: no rows in result set" {
+		log.Println(err.Error())
+		c.JSON(http.StatusInternalServerError, err.Error())
+		return
+	}
+	if user.ID > 0 {
+		uid1 = user.ID
+	}
+	err = dbmap.SelectOne(&user, "SELECT users.* FROM users WHERE uuid=?", unfollowUUID)
+	if err != nil && err.Error() != "sql: no rows in result set" {
+		log.Println(err.Error())
+		c.JSON(http.StatusInternalServerError, err.Error())
+		return
+	}
+	if user.ID > 0 {
+		uid2 = user.ID
+	}
+	if uid1 > 0 && uid2 > 0 {
+		dbmap.Exec("delete from follows where user_id_1=? and user_id_2=?", uid1, uid2)
+	} else if uid1 <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "your UUID was not valid"})
+		return
+	} else if uid2 <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unfollow UUID was not valid"})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"status": "success",
 	})
@@ -518,6 +647,6 @@ func getUsers(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, users)
+	c.JSON(http.StatusOK, gin.H{"users": users})
 	return
 }
