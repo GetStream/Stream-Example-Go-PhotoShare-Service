@@ -145,7 +145,10 @@ func main() {
 	router.Static("/termsofservice", "termsofservice.html")
 
 	router.GET("/users", getUsers)
+	router.GET("/photolikes", getPhotoLikes)
+	router.GET("/mylikes", getMyLikes)
 	router.GET("/feed/:uuid", getFeed)
+	router.GET("/myfollows", getMyFollows)
 	router.GET("/follow/:target", getFollow)
 	router.GET("/unfollow/:target", getUnfollow)
 	//router.POST("/like/:uuid", postLikePhoto)
@@ -230,6 +233,10 @@ func getFeed(c *gin.Context) {
 	}
 
 	log.Println("returning activities")
+
+	if len(activities) == 0 {
+		activities = []FeedItem{}
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"uuid": userUUID,
@@ -637,6 +644,11 @@ func postLogin(c *gin.Context) {
 	return
 }
 
+/*
+  http://localhost:3000/users
+  returns array of user objects
+	{"users":[{"ID":1,"uuid":"9cf34d34-a042-4231-babc-eee6ba67bd18","username":"ian","email":"ian@example.com"},{...}, ...]}
+ */
 func getUsers(c *gin.Context) {
 	var users []User
 
@@ -648,5 +660,126 @@ func getUsers(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"users": users})
+	return
+}
+
+/*
+  http://localhost:3000/photolikes?uuid=3c7c77bd-e1b4-4e64-9c9d-fff223efc17b
+  returns count of likes for a photo's UUID
+	{"likes":23}
+ */
+func getPhotoLikes(c *gin.Context) {
+	var photo_id int = 0;
+	var count int = 0;
+
+	photoUUID := c.Query("uuid")
+	log.Println("photo uuid:", photoUUID)
+	err := dbmap.SelectOne(&photo_id, "SELECT ID FROM photos WHERE UUID=?", photoUUID)
+	log.Println("db id:", photo_id)
+	if err != nil {
+		if err.Error() != "sql: no rows in result set" {
+			log.Println(err.Error())
+			c.JSON(http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err.Error() == "sql: no rows in result set" {
+			log.Println(err.Error())
+			c.JSON(http.StatusNotFound, "photo not found")
+			return
+		}
+	}
+
+	err = dbmap.SelectOne(&count, "SELECT count(*) FROM likes WHERE photo_id=?", photo_id)
+	if err != nil && err.Error() != "sql: no rows in result set" {
+		log.Println(err.Error())
+		c.JSON(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"likes": count})
+	return
+}
+
+/*
+  http://localhost:3000/mylikes?uuid=9cf34d34-a042-4231-babc-eee6ba67bd18
+  returns list of photo UUIDs you liked:
+	{"photos_liked":["3c7c77bd-e1b4-4e64-9c9d-fff223efc17b", "...", ...]}
+ */
+func getMyLikes(c *gin.Context) {
+	var user User;
+
+	userUUID := c.Query("uuid")
+
+	err := dbmap.SelectOne(&user, "SELECT * FROM users WHERE UUID=?", userUUID)
+	if err != nil {
+		if err.Error() != "sql: no rows in result set" {
+			log.Println(err.Error())
+			c.JSON(http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err.Error() == "sql: no rows in result set" {
+			log.Println(err.Error())
+			c.JSON(http.StatusNotFound, "user not found")
+			return
+		}
+	}
+
+	photo_likes := []string{}
+
+	_, err = dbmap.Select(&photo_likes, `
+		SELECT p.UUID
+		FROM photos p
+		  JOIN likes on p.ID=likes.photo_id
+		WHERE likes.user_id=?`, user.ID)
+	if err != nil && err.Error() != "sql: no rows in result set" {
+		log.Println(err.Error())
+		c.JSON(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"photos_liked": photo_likes})
+
+	return
+}
+
+/*
+  http://localhost:3000/myfollows?uuid=9cf34d34-a042-4231-babc-eee6ba67bd18
+  returns list of user UUIDs you follow:
+	{"users_followed":["03a1cfed-3590-4aa8-a592-f78bc71ccfbd", "...", ...]}
+ */
+func getMyFollows(c *gin.Context) {
+	var user User;
+
+	userUUID := c.Query("uuid")
+
+	err := dbmap.SelectOne(&user, "SELECT * FROM users WHERE UUID=?", userUUID)
+	if err != nil {
+		if err.Error() != "sql: no rows in result set" {
+			log.Println(err.Error())
+			c.JSON(http.StatusInternalServerError, err.Error())
+			return
+		}
+		if err.Error() == "sql: no rows in result set" {
+			log.Println(err.Error())
+			c.JSON(http.StatusNotFound, "user not found")
+			return
+		}
+	}
+
+	follows := []string{}
+
+	_, err = dbmap.Select(&follows, `
+		SELECT u.UUID
+		FROM users u
+		  JOIN follows f ON f.user_id_2=u.ID
+		WHERE f.user_id_1=?`, user.ID)
+	if err != nil && err.Error() != "sql: no rows in result set" {
+		log.Println(err.Error())
+		c.JSON(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"users_followed": follows})
+
 	return
 }

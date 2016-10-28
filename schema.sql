@@ -33,3 +33,13 @@ CREATE TABLE follows
   user_id_2 INT(11)
 );
 INSERT INTO follows (user_id_1, user_id_2) VALUES (1, 2);
+
+
+CREATE TABLE likes
+(
+  user_id int(11),
+  photo_id int(11),
+  primary key (user_id, photo_id),
+  key user_id(user_id),
+  key photo_id(photo_id)
+);
