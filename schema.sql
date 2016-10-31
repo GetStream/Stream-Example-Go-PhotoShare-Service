@@ -1,3 +1,4 @@
+drop table if exists users;
 CREATE TABLE users
 (
   ID INT(10) unsigned PRIMARY KEY NOT NULL AUTO_INCREMENT,
@@ -12,6 +13,7 @@ INSERT INTO users (ID, CreatedAt, UpdatedAt, DeletedAt, UUID, Username, Email) V
 INSERT INTO users (ID, CreatedAt, UpdatedAt, DeletedAt, UUID, Username, Email) VALUES (2, '2016-10-26 17:33:35', '2016-10-26 17:33:35', null, '03a1cfed-3590-4aa8-a592-f78bc71ccfbd', 'josh', 'josh@getstream.io');
 
 
+drop table if exists photos;
 CREATE TABLE photos
 (
   ID INT(10) unsigned PRIMARY KEY NOT NULL AUTO_INCREMENT,
@@ -21,11 +23,12 @@ CREATE TABLE photos
   UserID INT(11),
   UUID VARCHAR(255),
   URL VARCHAR(255),
-  Likes INT(11)
+  Likes INT(11) default 0
 );
-INSERT INTO photos (CreatedAt, UpdatedAt, DeletedAt, UserID, UUID, URL, Likes) VALUES ('2016-10-25 18:28:28', '2016-10-25 18:28:29', null, 1, '3c7c77bd-e1b4-4e64-9c9d-fff223efc17b', 'https://android-demo.s3.amazonaws.com/photos/f5222729-17d5-4b21-bade-a3e7ce1adb1c.png', null);
+INSERT INTO photos (ID, CreatedAt, UpdatedAt, DeletedAt, UserID, UUID, URL, Likes) VALUES (1, '2016-10-25 18:28:28', '2016-10-25 18:28:29', null, 1, '3c7c77bd-e1b4-4e64-9c9d-fff223efc17b', 'https://android-demo.s3.amazonaws.com/photos/f5222729-17d5-4b21-bade-a3e7ce1adb1c.png', null);
 
 
+drop table if exists follows;
 CREATE TABLE follows
 (
   id INT(11) PRIMARY KEY NOT NULL AUTO_INCREMENT,
@@ -35,11 +38,14 @@ CREATE TABLE follows
 INSERT INTO follows (user_id_1, user_id_2) VALUES (1, 2);
 
 
+drop table if exists likes;
 CREATE TABLE likes
 (
+  id INT(11) PRIMARY KEY NOT NULL AUTO_INCREMENT,
   user_id int(11),
   photo_id int(11),
-  primary key (user_id, photo_id),
-  key user_id(user_id),
-  key photo_id(photo_id)
+  unique `user_photo_like`(user_id, photo_id),
+  key (user_id),
+  key (photo_id)
 );
+INSERT INTO likes (id, user_id, photo_id) VALUES (1, 1, 1);
