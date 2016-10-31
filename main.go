@@ -63,6 +63,8 @@ type FeedItem struct {
 	AuthorName  string `json:"author_name"`
 	AuthorID    string `json:"author_id"`
 	PhotoURL    string `json:"photo_url"`
+	PhotoUUID   string `json:"photo_uuid"`
+	DoIFollow   bool `json:"doifollow"`
 	Likes       int `json:"likes"`
 	ILikeThis   bool `json:"ilikethis"`
 	CreatedDate string `json:"created_date"`
@@ -161,8 +163,8 @@ func main() {
 	router.GET("/myfollows", getMyFollows)
 	router.GET("/follow/:target", getFollow)
 	router.GET("/unfollow/:target", getUnfollow)
-	router.POST("/likephoto/:photoUUID", getLikePhoto)
-	router.POST("/unlikephoto/:photoUUID", getUnlikePhoto)
+	router.GET("/likephoto/:photoUUID", getLikePhoto)
+	router.GET("/unlikephoto/:photoUUID", getUnlikePhoto)
 
 	router.GET("/testfeed", func(c *gin.Context) {
 		// redirect to the repo, blog post, etc.
@@ -191,15 +193,33 @@ func main() {
 func getFeed(c *gin.Context) {
 	var me User
 	var err error
+
 	userUUID := c.Param("uuid")
-	fmt.Println("userUUID:", userUUID)
+	log.Println("userUUID:", userUUID)
+
+	myUUID := c.Query("uuid")
+	log.Println("myUUID:", myUUID)
+
 	if userUUID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "user UUID not found"})
 		return
 	}
 
 	if userUUID != "global" {
-		me, err = validateUser(userUUID)
+		_, err = validateUser(userUUID)
+		if err != nil {
+			if err.Error() == "not found" {
+				c.JSON(http.StatusNotFound, err.Error())
+			} else {
+				log.Println(err.Error())
+				c.JSON(http.StatusInternalServerError, err.Error())
+			}
+			return
+		}
+	}
+
+	if myUUID != "" {
+		me, err = validateUser(myUUID)
 		if err != nil {
 			if err.Error() == "not found" {
 				c.JSON(http.StatusNotFound, err.Error())
@@ -232,7 +252,7 @@ func getFeed(c *gin.Context) {
 	var newestActivityUUID string
 
 	for idx, activity := range feedActivities.Activities {
-		log.Println("activity ID:", activity.ID)
+		log.Println("------------------\nactivity ID:", activity.ID)
 		log.Println("activity ForeignID:", activity.ForeignID)
 		if idx == 0 {
 			newestActivityUUID = activity.ID
@@ -245,22 +265,38 @@ func getFeed(c *gin.Context) {
 			log.Println(err.Error())
 			continue
 		}
+
+		var doIFollow bool = false;
+		if me.ID > 0 {
+			doIFollow, err = fetchDoIFollow(me.ID, user.ID)
+			if err != nil {
+				log.Println("fetchDoIFollow error:", err)
+			}
+		} else {
+			log.Println("skipped follow check, me.ID:", me.ID)
+		}
+
 		if activity.MetaData["photoUrl"] == "http://unknown.image" {
 			log.Println("skipping bad url")
 			continue
 		}
 
-		photo, _ := validatePhoto(activity.ForeignID)
-		log.Println("url:", photo.URL)
-		log.Println("ID:", photo.ID)
-		if photo.ID == 0 {
-			log.Println("skipping bad uuid, no db match:", activity.ForeignID)
+		photo, err := validatePhoto(activity.ForeignID)
+		if err != nil {
+		log.Println("fetchDoILikePhoto error:", err)
 			continue
 		}
+		log.Println("url:", photo.URL)
+		log.Println("ID:", photo.ID)
 		count, _ := fetchPhotoLikes(photo.ID)
 		var like bool = false
 		if me.ID > 0 {
-			like, _ = fetchDoILikePhoto(me.ID, photo.ID)
+			like, err = fetchDoILikePhoto(me.ID, photo.ID)
+			if err != nil {
+				log.Println("fetchDoILikePhoto error:", err)
+			}
+		} else {
+			log.Println("skipped photo like check, me.ID:", me.ID)
 		}
 
 		activities = append(activities, FeedItem{
@@ -269,7 +305,9 @@ func getFeed(c *gin.Context) {
 			AuthorName: user.Username,
 			Likes: count,
 			ILikeThis: like,
+			DoIFollow: doIFollow,
 			PhotoURL: activity.MetaData["photoUrl"],
+			PhotoUUID: photo.UUID,
 			ID: activity.ForeignID,
 			CreatedDate: activity.TimeStamp.Format("2006-01-02T15:04:05.999999"),
 		})
@@ -438,9 +476,14 @@ func getUnfollow(c *gin.Context) {
 
 func getLikePhoto(c *gin.Context) {
 	userUUID := c.Query("uuid")
+	photoUUID := c.Param("photoUUID")
+
+	log.Println("user", userUUID, "photo", photoUUID)
+
 	user, err := validateUser(userUUID)
 	if err != nil {
 		if err.Error() == "not found" {
+			log.Println("getLikePhoto, user uuid not found")
 			c.JSON(http.StatusNotFound, "user " + err.Error())
 		} else {
 			log.Println(err.Error())
@@ -449,10 +492,10 @@ func getLikePhoto(c *gin.Context) {
 		return
 	}
 
-	photoUUID := c.Param("photoUUID")
-	photo, err := validateUser(photoUUID)
+	photo, err := validatePhoto(photoUUID)
 	if err != nil {
 		if err.Error() == "not found" {
+			log.Println("getLikePhoto, photo uuid not found")
 			c.JSON(http.StatusNotFound, "photo " + err.Error())
 		} else {
 			log.Println(err.Error())
@@ -483,9 +526,14 @@ func getLikePhoto(c *gin.Context) {
 
 func getUnlikePhoto(c *gin.Context) {
 	userUUID := c.Query("uuid")
+	photoUUID := c.Param("photoUUID")
+
+	log.Println("user", userUUID, "photo", photoUUID)
+
 	user, err := validateUser(userUUID)
 	if err != nil {
 		if err.Error() == "not found" {
+			log.Println("getLikePhoto, user uuid not found")
 			c.JSON(http.StatusNotFound, "user " + err.Error())
 		} else {
 			log.Println(err.Error())
@@ -494,10 +542,10 @@ func getUnlikePhoto(c *gin.Context) {
 		return
 	}
 
-	photoUUID := c.Param("photoUUID")
-	photo, err := validateUser(photoUUID)
+	photo, err := validatePhoto(photoUUID)
 	if err != nil {
 		if err.Error() == "not found" {
+			log.Println("getLikePhoto, photo uuid not found")
 			c.JSON(http.StatusNotFound, "photo " + err.Error())
 		} else {
 			log.Println(err.Error())
@@ -506,6 +554,8 @@ func getUnlikePhoto(c *gin.Context) {
 		return
 	}
 
+	log.Println(user.ID, photo.ID)
+
 	var foreign_id int = 0
 	err = dbmap.SelectOne(&foreign_id, `SELECT id FROM likes WHERE user_id=? AND photo_id=?`, user.ID, photo.ID)
 	if err != nil && err.Error() != "sql: no rows in result set" {
@@ -513,7 +563,12 @@ func getUnlikePhoto(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, err.Error())
 		return
 	}
-	dbmap.Exec("DELETE FROM likes WHERE id=?", foreign_id)
+	_, err = dbmap.Exec("DELETE FROM likes WHERE id=?", foreign_id)
+	if err != nil {
+		log.Println(err.Error())
+		c.JSON(http.StatusInternalServerError, err.Error())
+		return
+	}
 
 	// TODO alter feeds
 
@@ -962,7 +1017,7 @@ func fetchDoILikePhoto(myID uint, photoID uint) (bool, error) {
 		SELECT id
 		FROM likes
 		WHERE user_id=? AND photo_id=?`, myID, photoID)
-	if err != nil {
+	if err != nil && err.Error() != "sql: no rows in result set" {
 		return false, err
 	}
 	if rowID > 0 {
@@ -973,16 +1028,21 @@ func fetchDoILikePhoto(myID uint, photoID uint) (bool, error) {
 
 func fetchDoIFollow(myID uint, userID uint) (bool, error) {
 	var rowID int = 0
+	log.Println("fetchDoIFollow ids:", myID, userID)
+
 	err := dbmap.SelectOne(&rowID, `
 		SELECT id
 		FROM follows
 		WHERE user_id_1=? AND user_id_2=?`, myID, userID)
-	if err != nil {
+	if err != nil && err.Error() != "sql: no rows in result set" {
+		log.Println("fetchDoIFollow 1")
 		return false, err
 	}
 	if rowID > 0 {
+		log.Println("fetchDoIFollow 2")
 		return true, nil
 	}
+	log.Println("fetchDoIFollow 3")
 	return false, nil
 }
 
