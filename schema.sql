@@ -41,11 +41,15 @@ INSERT INTO follows (user_id_1, user_id_2) VALUES (1, 2);
 drop table if exists likes;
 CREATE TABLE likes
 (
-  id INT(11) PRIMARY KEY NOT NULL AUTO_INCREMENT,
-  user_id int(11),
-  photo_id int(11),
+  ID INT(10) unsigned PRIMARY KEY NOT NULL AUTO_INCREMENT,
+  CreatedAt DATETIME,
+  UpdatedAt DATETIME,
+  DeletedAt DATETIME,
+  UserID INT(10) unsigned,
+  PhotoID INT(10) unsigned,
+  FeedID VARCHAR(255),
   unique `user_photo_like`(user_id, photo_id),
   key (user_id),
   key (photo_id)
 );
-INSERT INTO likes (id, user_id, photo_id) VALUES (1, 1, 1);
+

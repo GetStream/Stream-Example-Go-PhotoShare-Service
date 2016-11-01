@@ -38,6 +38,13 @@ type User struct {
 	Email    string `gorm:"column:email" json:"email"`
 }
 
+type Likes struct {
+	gorm.Model
+	UserID uint
+	PhotoID uint
+	FeedID string
+}
+
 type UserItem struct {
 	UUID      string `json:"uuid"`
 	Username  string `json:"username"`
@@ -47,7 +54,7 @@ type UserItem struct {
 
 type Photo struct {
 	gorm.Model
-	UserID int  `gorm:"column:user_id,index" json:"user_id"`
+	UserID uint  `gorm:"column:user_id,index" json:"user_id"`
 	UUID   string `gorm:"column:uuid" json:"uuid"`
 	URL    string `gorm:"column:url" json:"url"`
 	Likes  int `gorm:"column:likes" json:"likes"`
@@ -69,15 +76,22 @@ type FeedItem struct {
 	ILikeThis   bool `json:"ilikethis"`
 	CreatedDate string `json:"created_date"`
 }
-
-var test_global_feed = []FeedItem{
-	{ID:"3", CreatedDate:"2016-10-19", AuthorID: uuid.New(), AuthorName:"thierry", AuthorEmail:"no_gravatar@example.com", PhotoURL:"http://i1054.photobucket.com/albums/s499/vadimzbanok/1327.jpg"},
-	{ID:"1", CreatedDate:"2016-10-17", AuthorID: uuid.New(), AuthorName:"ian", AuthorEmail:"ian.douglas@iandouglas.com", PhotoURL:"http://greenhackathon.com/graphics/greenhackathon_logo.png"},
-	{ID:"2", CreatedDate:"2016-10-18", AuthorID: uuid.New(), AuthorName:"josh", AuthorEmail:"joshtilton@gmail.com", PhotoURL:"http://clubpenguin.wikia.com/wiki/File:Funny_RP.PNG"},
+type AggregatedFeedItem struct {
+	AuthorEmail string `json:"author_email"`
+	AuthorName  string `json:"author_name"`
+	AuthorID    string `json:"author_id"`
+	Photos      []string `json:"photos"`
+	CreatedDate string `json:"created_date"`
 }
-var test_user_feed = []FeedItem{
-	{ID:"3", CreatedDate:"2016-10-19", AuthorID: uuid.New(), AuthorName:"thierry", AuthorEmail:"no_gravatar@example.com", PhotoURL:"https://pixabay.com/static/uploads/photo/2016/03/28/12/35/cat-1285634_1280.png"},
-	{ID:"2", CreatedDate:"2016-10-18", AuthorID: uuid.New(), AuthorName:"josh", AuthorEmail:"joshtilton@gmail.com", PhotoURL:"https://pixabay.com/static/uploads/photo/2015/04/14/08/52/lion-721836_1280.jpg"},
+
+type NotificationActor struct {
+	AuthorEmail string `json:"author_email"`
+	AuthorName  string `json:"author_name"`
+}
+type NotificationFeedItem struct {
+	Photo      string `json:"photo"`
+	Actors []NotificationActor `json:"actors"`
+	Verb      string `json:"verb"`
 }
 
 var dbmap = initDb()
@@ -90,6 +104,7 @@ func initDb() *gorp.DbMap {
 	dbmap := &gorp.DbMap{Db: db, Dialect: gorp.MySQLDialect{"InnoDB", "UTF8"}}
 	dbmap.AddTableWithName(User{}, "users").SetKeys(true, "ID")
 	dbmap.AddTableWithName(Photo{}, "photos").SetKeys(true, "ID")
+	dbmap.AddTableWithName(Likes{}, "likes").SetKeys(true, "ID")
 	err = dbmap.CreateTablesIfNotExists()
 	if err != nil {
 		panic("failed to create tables: " + err.Error())
@@ -156,25 +171,99 @@ func main() {
 	router.Static("/privacy", "privacy.html")
 	router.Static("/termsofservice", "termsofservice.html")
 
+	router.POST("/register", postRegister) // also does login
+
 	router.GET("/users", getUsers)
 	router.GET("/photolikes", getPhotoLikes)
 	router.GET("/mylikes", getMyLikes)
-	router.GET("/feed/:uuid", getFeed)
 	router.GET("/myfollows", getMyFollows)
-	router.GET("/follow/:target", getFollow)
-	router.GET("/unfollow/:target", getUnfollow)
+	router.GET("/follow/:targetUUID", getFollow)
+	router.GET("/unfollow/:targetUUID", getUnfollow)
 	router.GET("/likephoto/:photoUUID", getLikePhoto)
 	router.GET("/unlikephoto/:photoUUID", getUnlikePhoto)
+	router.GET("/profilestats/:myUUID", getUserProfileStats)
 
-	router.GET("/testfeed", func(c *gin.Context) {
-		// redirect to the repo, blog post, etc.
-		//c.Redirect(http.StatusTemporaryRedirect, "//getstream.io/blog")
-		c.JSON(http.StatusOK, gin.H{
-			"feed": test_global_feed,
-		})
+	/* get user feeds
+
+	Best Practices:
+	- send myUUID on calls so you can determine on your return payload whether your user follows the author
+	- send &newestActivityUUID= for pulling newer items later so you don't refetch the entire feed every time
+	  - this code will send "newest_activity_id" to assist with this
+
+	// get global feed, myUUID is optional
+	http://localhost:3000/feed/user/global?myUUID=
+	http://localhost:3000/feed/user/global?uuid=9cf34d34-a042-4231-babc-eee6ba67bd18
+
+	// get one user's feed data (to see your own feed of items)
+	// sending myUUID for a different user will show whether you follow them or liked their photos
+	http://localhost:3000/feed/user/9cf34d34-a042-4231-babc-eee6ba67bd18?myUUID=9cf34d34-a042-4231-babc-eee6ba67bd18
+	*/
+	router.GET("/feed/notifications", func(c *gin.Context) {
+		log.Println("fetching my notifications")
+		var statusCode int
+		var payload gin.H
+
+		feedSlug := "notification"
+		myUserUUID := c.Query("myUUID")
+
+		if myUserUUID == "" {
+			statusCode = http.StatusNotFound
+			payload = gin.H{"error": "missing myUUID parameter"}
+		} else {
+			lastActivityUUID := c.Query("newestActivityUUID")
+			statusCode, payload = getNotificationFeed(feedSlug, myUserUUID, lastActivityUUID);
+		}
+		c.JSON(statusCode, payload)
 	})
-	router.POST("/login", postLogin)
-	router.POST("/register", postRegister)
+	router.GET("/feed/user/:feedUUID", func(c *gin.Context) {
+		var statusCode int
+		var payload gin.H
+
+		feedStub := "user"
+		feedUUID := c.Param("feedUUID")
+		myUserUUID := c.Query("myUUID")
+
+		lastActivityUUID := c.Query("newestActivityUUID")
+		statusCode, payload = getFlatFeed(feedStub, feedUUID, myUserUUID, lastActivityUUID);
+		c.JSON(statusCode, payload)
+	})
+	router.GET("/feed/timeline/:feedUUID", func(c *gin.Context) {
+		var statusCode int
+		var payload gin.H
+
+		feedStub := "timeline"
+		feedUUID := c.Param("feedUUID")
+		myUserUUID := c.Query("myUUID")
+
+		if feedUUID == "global" {
+			statusCode = http.StatusNotFound
+			payload = gin.H{"error": "global timeline feed does not exist"}
+		} else {
+			lastActivityUUID := c.Query("newestActivityUUID")
+			statusCode, payload = getFlatFeed(feedStub, feedUUID, myUserUUID, lastActivityUUID);
+		}
+		c.JSON(statusCode, payload)
+	})
+	router.GET("/feed/timeline_aggregated/:feedUUID", func(c *gin.Context) {
+		var statusCode int
+		var payload gin.H
+
+		feedSlug := "timeline_aggregated"
+		feedUUID := c.Param("feedUUID")
+		myUserUUID := c.Query("myUUID")
+
+		if feedUUID == "global" {
+			statusCode = http.StatusNotFound
+			payload = gin.H{"error": "global timeline aggregated feed does not exist"}
+		} else {
+			lastActivityUUID := c.Query("newestActivityUUID")
+			statusCode, payload = getAggregatedFeed(feedSlug, feedUUID, myUserUUID, lastActivityUUID);
+		}
+		c.JSON(statusCode, payload)
+	})
+
+
+	// post a photo to global feed and user's feed
 	router.POST("/upload", postPhotoUpload)
 
 	// no more custom code under here
@@ -190,127 +279,61 @@ func main() {
 	router.Run("0.0.0.0:3000")
 }
 
-func getFeed(c *gin.Context) {
-	var me User
+func getFlatFeed(
+feedSlug string,
+feedUserUUID string,
+myUserUUID string,
+lastActivityUUID string,
+) (int, map[string]interface{}) {
 	var err error
-
-	userUUID := c.Param("uuid")
-	log.Println("userUUID:", userUUID)
-
-	myUUID := c.Query("uuid")
-	log.Println("myUUID:", myUUID)
-
-	if userUUID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "user UUID not found"})
-		return
-	}
-
-	if userUUID != "global" {
-		_, err = validateUser(userUUID)
-		if err != nil {
-			if err.Error() == "not found" {
-				c.JSON(http.StatusNotFound, err.Error())
-			} else {
-				log.Println(err.Error())
-				c.JSON(http.StatusInternalServerError, err.Error())
-			}
-			return
-		}
-	}
-
-	if myUUID != "" {
-		me, err = validateUser(myUUID)
-		if err != nil {
-			if err.Error() == "not found" {
-				c.JSON(http.StatusNotFound, err.Error())
-			} else {
-				log.Println(err.Error())
-				c.JSON(http.StatusInternalServerError, err.Error())
-			}
-			return
-		}
-	}
-
-	lastUUID := c.Query("lastUUID")
-
-	log.Println("fetching feed for user", userUUID)
-	// get user stream, send back in json format
-	userFeed, err := StreamClient.FlatFeed("user", userUUID)
-	if err != nil {
-		log.Println("fetch feed threw an error")
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": err.Error(),
-		})
-	}
-	var options getstream.GetFlatFeedInput
-	options.Limit = 50
-	if lastUUID != "" {
-		options.IDGT = lastUUID
-	}
-	feedActivities, err := userFeed.Activities(&options)
 	var activities []FeedItem
 	var newestActivityUUID string
+	var me User
 
-	for idx, activity := range feedActivities.Activities {
-		log.Println("------------------\nactivity ID:", activity.ID)
-		log.Println("activity ForeignID:", activity.ForeignID)
-		if idx == 0 {
-			newestActivityUUID = activity.ID
-		}
-		var user User
-		bits := strings.Split(string(activity.Actor), ":")
-		actor := bits[1]
-		err := dbmap.SelectOne(&user, "SELECT users.* FROM users WHERE uuid=?", actor)
+	if feedUserUUID == "" {
+		return http.StatusBadRequest, gin.H{"error": "user UUID not found"}
+	}
+	if feedUserUUID != "global" {
+		_, err := validateUser(feedUserUUID)
 		if err != nil {
-			log.Println(err.Error())
-			continue
-		}
-
-		var doIFollow bool = false;
-		if me.ID > 0 {
-			doIFollow, err = fetchDoIFollow(me.ID, user.ID)
-			if err != nil {
-				log.Println("fetchDoIFollow error:", err)
+			if err.Error() == "not found" {
+				return http.StatusNotFound, gin.H{"error": "user " + err.Error()}
+			} else {
+				log.Println(err.Error())
+				return http.StatusInternalServerError, gin.H{"error": err.Error()}
 			}
-		} else {
-			log.Println("skipped follow check, me.ID:", me.ID)
 		}
-
-		if activity.MetaData["photoUrl"] == "http://unknown.image" {
-			log.Println("skipping bad url")
-			continue
-		}
-
-		photo, err := validatePhoto(activity.ForeignID)
+	}
+	if myUserUUID != "" {
+		me, err = validateUser(myUserUUID)
 		if err != nil {
-		log.Println("fetchDoILikePhoto error:", err)
-			continue
-		}
-		log.Println("url:", photo.URL)
-		log.Println("ID:", photo.ID)
-		count, _ := fetchPhotoLikes(photo.ID)
-		var like bool = false
-		if me.ID > 0 {
-			like, err = fetchDoILikePhoto(me.ID, photo.ID)
-			if err != nil {
-				log.Println("fetchDoILikePhoto error:", err)
+			log.Println("validate user threw an error:", err)
+			if err.Error() == "not found" {
+				return http.StatusNotFound, gin.H{"error": err.Error()}
+			} else {
+				log.Println(err.Error())
+				return http.StatusInternalServerError, gin.H{"error": err.Error()}
 			}
-		} else {
-			log.Println("skipped photo like check, me.ID:", me.ID)
 		}
+	}
 
-		activities = append(activities, FeedItem{
-			AuthorEmail: user.Email,
-			AuthorID: user.UUID,
-			AuthorName: user.Username,
-			Likes: count,
-			ILikeThis: like,
-			DoIFollow: doIFollow,
-			PhotoURL: activity.MetaData["photoUrl"],
-			PhotoUUID: photo.UUID,
-			ID: activity.ForeignID,
-			CreatedDate: activity.TimeStamp.Format("2006-01-02T15:04:05.999999"),
-		})
+	var options getstream.GetFlatFeedInput
+	options.Limit = 100
+	if lastActivityUUID != "" {
+		options.IDGT = lastActivityUUID
+	}
+	streamFeed, err := StreamClient.FlatFeed(feedSlug, feedUserUUID)
+	if err != nil {
+		log.Println("fetch feed threw an error")
+		return http.StatusInternalServerError, gin.H{"error": err.Error()}
+	}
+
+	feedActivities, err := streamFeed.Activities(&options)
+
+	activities = parseFlatFeed(me, feedActivities.Activities)
+	newestActivityUUID = ""
+	if len(activities) > 0 {
+		newestActivityUUID = activities[0].ID
 	}
 
 	log.Println("returning activities")
@@ -319,168 +342,375 @@ func getFeed(c *gin.Context) {
 		activities = []FeedItem{}
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"uuid": userUUID,
+	return http.StatusOK, gin.H{
+		"uuid": feedUserUUID,
 		"newest_activity_id": newestActivityUUID,
 		"feed": activities,
-	})
+	}
+}
+func parseFlatFeed(me User, inActivities []*getstream.Activity) []FeedItem {
+	var activities []FeedItem
+	var doIFollowUser bool = false
+	var doILikePhoto bool = false
+
+	for _, activity := range inActivities {
+		log.Println("------------------\nactivity ID:", activity.ID)
+		fmt.Println("%+v", activity)
+		log.Println("activity ForeignID:", activity.ForeignID)
+		bits := strings.Split(string(activity.Actor), ":")
+		actorUUID := bits[1]
+		user, err := validateUser(actorUUID)
+		if err != nil {
+			log.Println("skipping activity, validating activity actor failed:", err.Error())
+			continue
+		}
+
+		if me.ID > 0 {
+			doIFollowUser, err = fetchDoIFollow(me.ID, user.ID)
+			if err != nil {
+				log.Println("fetchDoIFollow error:", err)
+			}
+		}
+
+		photo, err := validatePhoto(activity.ForeignID)
+		if err != nil {
+			log.Println("validatePhoto error:", err)
+			continue
+		}
+
+		count, _ := fetchPhotoLikes(photo.ID)
+		if me.ID > 0 {
+			doILikePhoto, err = fetchDoILikePhoto(me.ID, photo.ID)
+			if err != nil {
+				log.Println("fetchDoILikePhoto error:", err)
+			}
+		}
+
+		activities = append(activities, FeedItem{
+			AuthorEmail: user.Email,
+			AuthorID: user.UUID,
+			AuthorName: user.Username,
+			Likes: count,
+			ILikeThis: doILikePhoto,
+			DoIFollow: doIFollowUser,
+			PhotoURL: activity.MetaData["photoUrl"],
+			PhotoUUID: photo.UUID,
+			ID: activity.ForeignID,
+			CreatedDate: activity.TimeStamp.Format("2006-01-02T15:04:05.999999"),
+		})
+	}
+
+	return activities
 }
 
+func getAggregatedFeed(
+feedSlug string,
+feedUserUUID string,
+myUserUUID string,
+lastActivityUUID string,
+) (int, map[string]interface{}) {
+	var err error
+	var newestActivityUUID string
+
+	if feedUserUUID == "" {
+		return http.StatusBadRequest, gin.H{"error": "user UUID not found"}
+	}
+	if feedUserUUID != "global" {
+		_, err := validateUser(feedUserUUID)
+		if err != nil {
+			if err.Error() == "not found" {
+				return http.StatusNotFound, gin.H{"error": "user " + err.Error()}
+			} else {
+				log.Println(err.Error())
+				return http.StatusInternalServerError, gin.H{"error": err.Error()}
+			}
+		}
+	}
+	if myUserUUID != "" {
+		_, err = validateUser(myUserUUID)
+		if err != nil {
+			log.Println("validate user threw an error:", err)
+			if err.Error() == "not found" {
+				return http.StatusNotFound, gin.H{"error": err.Error()}
+			} else {
+				log.Println(err.Error())
+				return http.StatusInternalServerError, gin.H{"error": err.Error()}
+			}
+		}
+	}
+
+	var options getstream.GetAggregatedFeedInput
+	options.Limit = 100
+	if lastActivityUUID != "" {
+		options.IDGT = lastActivityUUID
+	}
+	streamFeed, err := StreamClient.AggregatedFeed(feedSlug, feedUserUUID)
+	if err != nil {
+		log.Println("fetch feed threw an error")
+		return http.StatusInternalServerError, gin.H{"error": err.Error()}
+	}
+
+	feedActivities, err := streamFeed.Activities(&options)
+	activities := parseAggregatedFeed(feedActivities)
+
+	newestActivityUUID = feedActivities.Next
+
+	return http.StatusOK, gin.H{
+		"uuid": feedUserUUID,
+		"newest_activity_id": newestActivityUUID,
+		"feed": activities,
+	}
+}
+func parseAggregatedFeed(inActivities *getstream.GetAggregatedFeedOutput) []AggregatedFeedItem {
+	activities := []AggregatedFeedItem{}
+
+	for _, result := range inActivities.Results {
+
+		groupBits := strings.Split(result.Group, "_")
+		userBits := strings.Split(groupBits[0], ":")
+		actorUUID := userBits[1]
+		actor, err := validateUser(actorUUID)
+		if err != nil {
+			log.Println("actvity actor validateUser error:", err)
+			continue
+		}
+
+		aggActivity := AggregatedFeedItem{
+			CreatedDate: result.CreatedAt,
+			AuthorEmail: actor.Email,
+			AuthorName: actor.Username,
+			AuthorID: actor.UUID,
+		}
+		photos := []string{}
+		for _, activity := range result.Activities {
+
+			p, err := validatePhoto(activity.ForeignID)
+			if err != nil {
+				log.Println("validatePhoto error:", err)
+				continue
+			}
+
+			photos = append(photos, p.URL)
+		}
+		aggActivity.Photos = photos
+		activities = append(activities, aggActivity)
+	}
+
+	return activities
+}
+
+func getNotificationFeed(
+feedSlug string,
+myUserUUID string,
+lastActivityUUID string,
+) (int, map[string]interface{}) {
+	var err error
+	var newestActivityUUID string
+
+	_, err = validateUser(myUserUUID)
+	if err != nil {
+		if err.Error() == "not found" {
+			return http.StatusNotFound, gin.H{"error": "user " + err.Error()}
+		} else {
+			log.Println(err.Error())
+			return http.StatusInternalServerError, gin.H{"error": err.Error()}
+		}
+	}
+
+	var options getstream.GetNotificationFeedInput
+	options.Limit = 100
+	if lastActivityUUID != "" {
+		options.IDGT = lastActivityUUID
+	}
+	streamFeed, err := StreamClient.NotificationFeed(feedSlug, myUserUUID)
+	if err != nil {
+		log.Println("fetch feed threw an error")
+		return http.StatusInternalServerError, gin.H{"error": err.Error()}
+	}
+
+	feedActivities, err := streamFeed.Activities(&options)
+	activities := parseNotificationFeed(feedActivities)
+
+	//newestActivityUUID = feedActivities.Next
+
+	return http.StatusOK, gin.H{
+		"newest_activity_id": newestActivityUUID,
+		"feed": activities,
+	}
+}
+func parseNotificationFeed(inActivities *getstream.GetNotificationFeedOutput) []NotificationFeedItem {
+	activities := []NotificationFeedItem{}
+
+	var track map[string]NotificationFeedItem
+
+	for _, activity := range inActivities.Results {
+		verb := activity.Verb
+		track[verb] =
+	}
+
+	return activities
+}
+
+/* best practice:
+   my 'timeline' feed follows someone else's 'user' feed
+ */
 func getFollow(c *gin.Context) {
-	userUUID := c.Query("uuid")
-	if userUUID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "user UUID not found"})
-		return
-	}
-
-	followUUID := c.Param("target")
-	if followUUID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "target feed UUID not found"})
-		return
-	}
-
-	var user User
-	var uid1 uint = 0
-	var uid2 uint = 0
-	err := dbmap.SelectOne(&user, "SELECT users.* FROM users WHERE uuid=?", userUUID)
-	if err != nil && err.Error() != "sql: no rows in result set" {
-		log.Println(err.Error())
-		c.JSON(http.StatusInternalServerError, err.Error())
-		return
-	}
-	if user.ID > 0 {
-		uid1 = user.ID
-	}
-	err = dbmap.SelectOne(&user, "SELECT users.* FROM users WHERE uuid=?", followUUID)
-	if err != nil && err.Error() != "sql: no rows in result set" {
-		log.Println(err.Error())
-		c.JSON(http.StatusInternalServerError, err.Error())
-		return
-	}
-	if user.ID > 0 {
-		uid2 = user.ID
-	}
-	if uid1 <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "your UUID was not valid"})
-		return
-	}
-	if uid2 <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "follow UUID was not valid"})
-		return
-	}
-
 	var follow_id uint = 0
-	err = dbmap.SelectOne(&follow_id, "SELECT id FROM follows WHERE user_id_1=? AND user_id_2=?", uid1, uid2)
+
+	myUUID := c.Query("myUUID")
+	me, err := validateUser(myUUID)
+	if err != nil {
+		if err.Error() == "not found" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "myUUID " + err.Error()})
+			return
+		} else {
+			log.Println(err.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	targetUUID := c.Param("targetUUID")
+	if targetUUID == myUUID {
+		c.JSON(http.StatusBadRequest, gin.H{"best_practice_violation": "users should not follow themselves"})
+		return
+	}
+	target, err := validateUser(targetUUID)
+	if err != nil {
+		if err.Error() == "not found" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "targetUUID " + err.Error()})
+			return
+		} else {
+			log.Println(err.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
+	err = dbmap.SelectOne(&follow_id, "SELECT id FROM follows WHERE user_id_1=? AND user_id_2=?", me.ID, target.ID)
 	if err != nil && err.Error() != "sql: no rows in result set" {
 		log.Println(err.Error())
 		c.JSON(http.StatusInternalServerError, err.Error())
 		return
 	}
-	if follow_id <= 0 {
-
-		_, err = dbmap.Exec(`INSERT INTO follows (user_id_1, user_id_2) VALUES (?, ?)`, uid1, uid2)
-		if err != nil {
-			log.Println("sending error after insert")
-			c.JSON(http.StatusBadRequest, gin.H{"errors": err.Error()})
-			return
-		}
-
-		userFeed, err := StreamClient.FlatFeed("user", userUUID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-
-		targetFeed, err := StreamClient.FlatFeed("user", followUUID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-
-		userFeed.FollowFeedWithCopyLimit(targetFeed, 50)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
+	_, err = dbmap.Exec(`INSERT INTO follows (user_id_1, user_id_2) VALUES (?, ?)`, me.ID, target.ID)
+	if err != nil {
+		log.Println("sending error after insert")
+		c.JSON(http.StatusBadRequest, gin.H{"errors": err.Error()})
+		return
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"status": "success",
-	})
+
+	myFeed, err := StreamClient.FlatFeed("timeline", myUUID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	myAggFeed, err := StreamClient.FlatFeed("timeline_aggregated", myUUID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	targetFeed, err := StreamClient.FlatFeed("user", targetUUID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// best practice
+	// my timeline feed follows your user feed, so my timeline shows each of your individual events
+	// my aggregated timeline feed follows your feed so my aggregated timeline shows "josh added two photos" etc
+	myFeed.FollowFeedWithCopyLimit(targetFeed, 50)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	myAggFeed.FollowFeedWithCopyLimit(targetFeed, 50)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "success"})
 }
 
+/* best practice:
+   my 'timeline' feed unfollows someone else's 'user' feed
+ */
 func getUnfollow(c *gin.Context) {
-	userUUID := c.Query("uuid")
-	if userUUID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "user UUID not found"})
+	myUUID := c.Query("myUUID")
+	me, err := validateUser(myUUID)
+	if err != nil {
+		if err.Error() == "not found" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "myUUID " + err.Error()})
+			return
+		} else {
+			log.Println(err.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	targetUUID := c.Param("targetUUID")
+	if targetUUID == myUUID {
+		c.JSON(http.StatusBadRequest, gin.H{"best_practice_violation": "users should not unfollow themselves"})
 		return
 	}
-
-	unfollowUUID := c.Param("target")
-	if unfollowUUID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "target feed UUID not found"})
-		return
+	target, err := validateUser(targetUUID)
+	if err != nil {
+		if err.Error() == "not found" {
+			c.JSON(http.StatusNotFound, gin.H{"error": "targetUUID " + err.Error()})
+			return
+		} else {
+			log.Println(err.Error())
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
 
-	userFeed, err := StreamClient.FlatFeed("user", userUUID)
+	myFeed, err := StreamClient.FlatFeed("timeline", myUUID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	myAggFeed, err := StreamClient.FlatFeed("timeline_aggregated", myUUID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	targetFeed, err := StreamClient.FlatFeed("user", unfollowUUID)
+	targetFeed, err := StreamClient.FlatFeed("user", targetUUID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	userFeed.Unfollow(targetFeed)
+	// for unfollowing, you can also use UnfollowKeepingHistory if you want to keep old
+	// activities in myUUID's timeline but nothing new as of right now, just change the
+	// method name on the next line from .Unfollow() to .UnfollowKeepingHistory()
+	err = myFeed.Unfollow(targetFeed)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	err = myAggFeed.Unfollow(targetFeed)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	var user User
-	var uid1, uid2 uint
-	err = dbmap.SelectOne(&user, "SELECT users.* FROM users WHERE uuid=?", userUUID)
-	if err != nil && err.Error() != "sql: no rows in result set" {
-		log.Println(err.Error())
-		c.JSON(http.StatusInternalServerError, err.Error())
-		return
-	}
-	if user.ID > 0 {
-		uid1 = user.ID
-	}
-	err = dbmap.SelectOne(&user, "SELECT users.* FROM users WHERE uuid=?", unfollowUUID)
-	if err != nil && err.Error() != "sql: no rows in result set" {
-		log.Println(err.Error())
-		c.JSON(http.StatusInternalServerError, err.Error())
-		return
-	}
-	if user.ID > 0 {
-		uid2 = user.ID
-	}
-	if uid1 > 0 && uid2 > 0 {
-		dbmap.Exec("delete from follows where user_id_1=? and user_id_2=?", uid1, uid2)
-	} else if uid1 <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "your UUID was not valid"})
-		return
-	} else if uid2 <= 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "unfollow UUID was not valid"})
-		return
-	}
+	dbmap.Exec("DELETE FROM follows WHERE user_id_1=? AND user_id_2=?", me.ID, target.ID)
 
-	c.JSON(http.StatusOK, gin.H{
-		"status": "success",
-	})
+	c.JSON(http.StatusOK, gin.H{"status": "success"})
 }
 
 func getLikePhoto(c *gin.Context) {
-	userUUID := c.Query("uuid")
+	var targetUUID string
+
+	myUUID := c.Query("myUUID")
 	photoUUID := c.Param("photoUUID")
 
-	log.Println("user", userUUID, "photo", photoUUID)
+	log.Println("user", myUUID, "photo", photoUUID)
 
-	user, err := validateUser(userUUID)
+	user, err := validateUser(myUUID)
 	if err != nil {
 		if err.Error() == "not found" {
 			log.Println("getLikePhoto, user uuid not found")
@@ -504,33 +734,58 @@ func getLikePhoto(c *gin.Context) {
 		return
 	}
 
-	insert, err := dbmap.Exec(`INSERT INTO likes (user_id, photo_id) VALUES (?, ?)`, user.ID, photo.ID)
+	err = dbmap.SelectOne(&targetUUID, "SELECT uuid FROM users WHERE id=?", photo.UserID)
+	if err != nil && err.Error() != "sql: no rows in result set" {
+		log.Println("finding photo author failed:", err)
+		c.JSON(http.StatusInternalServerError, err.Error())
+		return
+	}
+	targetFeed, err := StreamClient.NotificationFeed("notification", targetUUID)
+	if err != nil {
+		log.Println("couldn't connect to notification feed:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	now := time.Now()
+
+	activity, err := targetFeed.AddActivity(&getstream.Activity{
+		Verb:      "like",
+		ForeignID: photo.UUID,
+		TimeStamp: &now,
+		Object:    getstream.FeedID(fmt.Sprintf("photo:%s", photo.UUID)),
+		Actor:     getstream.FeedID(fmt.Sprintf("user:%s", myUUID)),
+		MetaData:  map[string]string{
+			"photoUrl": photo.URL,
+		},
+	})
+	if err != nil {
+		log.Println("couldn't add activity to notification feed", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"errors": err.Error()})
+		return
+	}
+	log.Printf("outgoing activity\n%+v\n", activity)
+
+	_, err = dbmap.Exec(`INSERT INTO likes (UserID, PhotoID, FeedID) VALUES (?, ?, ?)`,
+		user.ID, photo.ID, activity.ID)
 	if err != nil {
 		log.Println("sending error after insert")
 		c.JSON(http.StatusInternalServerError, gin.H{"errors": err.Error()})
 		return
 	}
-	foreign_id, err := insert.LastInsertId()
-	if err != nil {
-		log.Println("sending error response from insert")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-	}
 
-	// TODO update feeds
-
-	c.JSON(http.StatusOK, gin.H{
-		"status": "success",
-		"foreign_id": foreign_id,
-	})
+	c.JSON(http.StatusOK, gin.H{"status": "success"})
 }
 
 func getUnlikePhoto(c *gin.Context) {
-	userUUID := c.Query("uuid")
+	var targetUUID string
+
+	myUUID := c.Query("myUUID")
 	photoUUID := c.Param("photoUUID")
 
-	log.Println("user", userUUID, "photo", photoUUID)
+	log.Println("user", myUUID, "photo", photoUUID)
 
-	user, err := validateUser(userUUID)
+	user, err := validateUser(myUUID)
 	if err != nil {
 		if err.Error() == "not found" {
 			log.Println("getLikePhoto, user uuid not found")
@@ -554,42 +809,59 @@ func getUnlikePhoto(c *gin.Context) {
 		return
 	}
 
-	log.Println(user.ID, photo.ID)
-
-	var foreign_id int = 0
-	err = dbmap.SelectOne(&foreign_id, `SELECT id FROM likes WHERE user_id=? AND photo_id=?`, user.ID, photo.ID)
+	err = dbmap.SelectOne(&targetUUID, "SELECT uuid FROM users WHERE id=?", photo.UserID)
 	if err != nil && err.Error() != "sql: no rows in result set" {
-		log.Println(err.Error())
+		log.Println("select uuid for photo author", err.Error())
 		c.JSON(http.StatusInternalServerError, err.Error())
 		return
 	}
-	_, err = dbmap.Exec("DELETE FROM likes WHERE id=?", foreign_id)
+	targetFeed, err := StreamClient.NotificationFeed("notification", targetUUID)
 	if err != nil {
-		log.Println(err.Error())
-		c.JSON(http.StatusInternalServerError, err.Error())
+		log.Println("couldn't connect to notification feed")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	// TODO alter feeds
+	var like Likes
+	err = dbmap.SelectOne(&like, `SELECT ID,FeedID FROM likes WHERE UserID=? AND PhotoID=?`, user.ID, photo.ID)
+	if err != nil && err.Error() != "sql: no rows in result set" {
+		log.Println("select * from likes", err.Error())
+		c.JSON(http.StatusInternalServerError, err.Error())
+		return
+	} else {
+		log.Printf("\n\n\nlike from db: %+v\n\n\n", like)
+		err = targetFeed.RemoveActivity(&getstream.Activity{ID: like.FeedID})
+		if err != nil {
+			log.Println("removing activity from stream failed:", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"errors": err.Error()})
+			return
+		}
 
-	c.JSON(http.StatusOK, gin.H{
-		"status": "success",
-		"foreign_id": foreign_id,
-	})
+		_, err = dbmap.Exec("DELETE FROM likes WHERE ID=?", like.ID)
+		if err != nil {
+			log.Println("delete from likes, like ID", like.ID, err)
+			c.JSON(http.StatusInternalServerError, err.Error())
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "success"})
+		return
+	}
+	c.JSON(http.StatusConflict, gin.H{"status": "no db entry for original like"})
 }
 
 func postPhotoUpload(c *gin.Context) {
-	// handle upload in the background
-	userUUID := c.PostForm("uuid")
-	var user_id int = 0
-	err := dbmap.SelectOne(&user_id, "SELECT id FROM users WHERE uuid=?", userUUID)
+	var me User
+
+	myUUID := c.PostForm("myUUID")
+	log.Println("myUUID", myUUID)
+	me, err := validateUser(myUUID)
 	if err != nil && err.Error() != "sql: no rows in result set" {
-		log.Println(err.Error())
-		c.JSON(http.StatusInternalServerError, err.Error())
+		log.Println("594", err.Error())
+		c.JSON(http.StatusInternalServerError, "user " + err.Error())
 		return
 	}
-	if user_id == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "uuid not valid, photo not processed"})
+	if me.ID == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "user uuid not valid, photo not processed"})
 		return
 	}
 
@@ -608,12 +880,12 @@ func postPhotoUpload(c *gin.Context) {
 
 	var photo Photo
 	photo.UUID = uuid.New()
-	photo.UserID = user_id
+	photo.UserID = me.ID
 
 	insert, err := dbmap.Exec(`
 		INSERT INTO photos (UUID, UserID, CreatedAt, UpdatedAt, Likes)
 		VALUES (?, ?, ?, ?, 0)`,
-		photo.UUID, user_id, time.Now(), time.Now())
+		photo.UUID, me.ID, time.Now(), time.Now())
 	if err != nil {
 		log.Println("sending error after photo insert")
 		c.JSON(http.StatusBadRequest, gin.H{"errors": err.Error()})
@@ -631,8 +903,6 @@ func postPhotoUpload(c *gin.Context) {
 	// create copy to be used inside the goroutine
 	cCp := c.Copy()
 	go func() {
-		log.Println("doing upload etc in the background")
-		log.Println("local filename:", localFilename)
 		var photoFilename string
 
 		// shrink image
@@ -677,26 +947,25 @@ func postPhotoUpload(c *gin.Context) {
 		result, err := S3Client.PutObject(params)
 		if err != nil {
 			if awsErr, ok := err.(awserr.Error); ok {
-				fmt.Println(awsErr.Code(), awsErr.Message(), awsErr.OrigErr())
+				log.Println(awsErr.Code(), awsErr.Message(), awsErr.OrigErr())
 				if reqErr, ok := err.(awserr.RequestFailure); ok {
 					// A service error occurred
-					fmt.Println(reqErr.Code(), reqErr.Message(), reqErr.StatusCode(), reqErr.RequestID())
+					log.Println(reqErr.Code(), reqErr.Message(), reqErr.StatusCode(), reqErr.RequestID())
 					log.Println(reqErr.Code(), reqErr.Message(), reqErr.StatusCode(), reqErr.RequestID())
 				}
 			} else {
 				// This case should never be hit, the SDK should always return an
 				// error which satisfies the awserr.Error interface.
 				log.Println("s3.PutObject err:", err.Error())
-				fmt.Println(err.Error())
 			}
 		}
 		log.Println("s3.PutObject finished")
-		fmt.Println(awsutil.StringValue(result))
+		log.Println(awsutil.StringValue(result))
 		// we need to get the S3 URL from that result somehow
 		photo.URL = "https://android-demo.s3.amazonaws.com/" + path
 
 		_, err = dbmap.Exec(`
-		UPDATE photos SET URL=?, UpdatedAt=? WHERE ID=?`,
+			UPDATE photos SET URL=?, UpdatedAt=? WHERE ID=?`,
 			photo.URL, time.Now(), photo_id)
 		if err != nil {
 			log.Println("sending error after photo insert")
@@ -705,17 +974,21 @@ func postPhotoUpload(c *gin.Context) {
 		}
 
 		now := time.Now()
-		userFeed, err := StreamClient.FlatFeed("user", userUUID)
+		globalFeed, err := StreamClient.FlatFeed("user", "global")
 		if err != nil {
-			fmt.Println(err)
+			log.Println(err)
+		}
+		userFeed, err := StreamClient.FlatFeed("user", myUUID)
+		if err != nil {
+			log.Println(err)
 		} else {
 			_, err = globalFeed.AddActivity(&getstream.Activity{
 				Verb:      "photo",
 				ForeignID: photo.UUID,
 				TimeStamp: &now,
-				To:        []getstream.Feed{globalFeed, userFeed},
+				To:        []getstream.Feed{userFeed},
 				Object:    getstream.FeedID(fmt.Sprintf("photo:%s", photo.UUID)),
-				Actor:     getstream.FeedID(fmt.Sprintf("user:%s", userUUID)),
+				Actor:     getstream.FeedID(fmt.Sprintf("user:%s", myUUID)),
 				MetaData:  map[string]string{
 					// add as many custom keys/values here as you like
 					"photoUrl": photo.URL,
@@ -730,6 +1003,10 @@ func postPhotoUpload(c *gin.Context) {
 	}()
 }
 
+/* we took a shortcut on authentication where a user 'registering' with the same username/email
+   already in the database would log in that user. This, of course, is not authentication best
+   practice, but a proper auth workflow is outside the scope of this project.
+ */
 func postRegister(c *gin.Context) {
 	var user User
 	var output []string
@@ -815,46 +1092,8 @@ func postRegister(c *gin.Context) {
 	log.Println("ended up here, no response to send back")
 }
 
-func postLogin(c *gin.Context) {
-	var user User
-	var output []string
-
-	email := c.PostForm("email")
-	username := c.PostForm("username")
-
-	if username == "" || email == "" {
-		if username == "" {
-			output = append(output, "Username cannot be blank")
-		}
-		if email == "" {
-			output = append(output, "Email cannot be blank")
-		}
-	} else {
-		err := dbmap.SelectOne(&user, "SELECT users.* FROM users WHERE username=? and email=?",
-			strings.ToLower(username),
-			strings.ToLower(email))
-		if err != nil && err.Error() != "sql: no rows in result set" {
-			log.Println(err.Error())
-			c.JSON(http.StatusInternalServerError, err.Error())
-			return
-		}
-		if user.Username == "" {
-			output = append(output, "Username or Email not found, please register")
-		}
-	}
-
-	if len(output) > 0 {
-		log.Println("sending friendly errors")
-		c.JSON(http.StatusBadRequest, gin.H{"errors": output})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"UUID": user.UUID, "email": user.Email, "username": user.Username})
-	return
-}
-
 /*
-  http://localhost:3000/users
+  http://localhost:3000/users?myUUID=9cf34d34-a042-4231-babc-eee6ba67bd18
   returns array of user objects
 	{"users":[{"ID":1,"uuid":"9cf34d34-a042-4231-babc-eee6ba67bd18","username":"ian","email":"ian@example.com"},{...}, ...]}
  */
@@ -862,7 +1101,7 @@ func getUsers(c *gin.Context) {
 	var data []User
 	var users []UserItem
 
-	userUUID := c.Query("uuid")
+	userUUID := c.Query("myUUID")
 	if userUUID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "user UUID not found"})
 		return
@@ -931,6 +1170,66 @@ func getPhotoLikes(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"likes": count})
 	return
+}
+
+/*
+  http://localhost:3000/profilestats/9cf34d34-a042-4231-babc-eee6ba67bd18
+  returns stats for a user
+  {
+	"following": 255,
+	"followers": 12,
+	"photos": 47,
+	"email": "user@email.com",
+	"username": "joesmith"
+  }
+
+ */
+func getUserProfileStats(c *gin.Context) {
+	var me User;
+
+	myUUID := c.Param("myUUID")
+	me, err := validateUser(myUUID)
+	if err != nil {
+		if err.Error() == "not found" {
+			c.JSON(http.StatusNotFound, "user " + err.Error())
+		} else {
+			log.Println(err.Error())
+			c.JSON(http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+
+	var followerCount int = 0
+	err = dbmap.SelectOne(&followerCount, "SELECT count(*) FROM follows WHERE user_id_2=?", me.ID)
+	if err != nil && err.Error() != "sql: no rows in result set" {
+		log.Println(err.Error())
+		c.JSON(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	var followingCount int = 0
+	err = dbmap.SelectOne(&followingCount, "SELECT count(*) FROM follows WHERE user_id_1=?", me.ID)
+	if err != nil && err.Error() != "sql: no rows in result set" {
+		log.Println(err.Error())
+		c.JSON(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	var photoCount int = 0
+	err = dbmap.SelectOne(&photoCount, "SELECT count(*) FROM photos WHERE UserID=?", me.ID)
+	if err != nil && err.Error() != "sql: no rows in result set" {
+		log.Println(err.Error())
+		c.JSON(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"following": followingCount,
+		"followers": followerCount,
+		"photos": photoCount,
+		"email": me.Email,
+		"username": me.Username,
+	})
 }
 
 /*
@@ -1053,7 +1352,6 @@ func fetchPhotoLikes(photoID uint) (int, error) {
 		return -1, err
 	}
 	return count, nil
-
 }
 
 func validateUser(userUUID string) (User, error) {
@@ -1064,6 +1362,7 @@ func validateUser(userUUID string) (User, error) {
 		if err.Error() == "sql: no rows in result set" {
 			err = errors.New("not found")
 		}
+		log.Println(err)
 		return data, err
 	}
 	return data, nil
@@ -1077,11 +1376,9 @@ func validatePhoto(photoUUID string) (Photo, error) {
 		if err.Error() == "sql: no rows in result set" {
 			err = errors.New("not found")
 		}
-		log.Println("validate photo url", data.URL)
 		log.Println("validate photo err", err)
 		return data, err
 	}
-	log.Println("photo validate, returning payload")
 	return data, nil
 
 }

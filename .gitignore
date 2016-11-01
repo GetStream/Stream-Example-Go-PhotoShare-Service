@@ -2,4 +2,4 @@ tmp/*
 .credentials
 .DS_Store
 .idea
-
+run.sh
