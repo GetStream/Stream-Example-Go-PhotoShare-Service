@@ -88,9 +88,10 @@ type NotificationActor struct {
 	AuthorEmail string `json:"author_email"`
 	AuthorName  string `json:"author_name"`
 }
-type NotificationFeedItem struct {
-	Photo  string `json:"photo"`
-	Actors []NotificationActor `json:"actors"`
+
+type NotificationLike struct {
+	PhotoURL string `json:"photo_url"`
+	Actors   []NotificationActor `json:"actors"`
 }
 
 var dbmap = initDb()
@@ -536,18 +537,15 @@ lastActivityUUID string,
 		"feed": activities,
 	}
 }
-func parseNotificationFeed(inActivities *getstream.GetNotificationFeedOutput) map[string]interface{} {
-	track := make(map[string]interface{})
+func parseNotificationFeed(inActivities *getstream.GetNotificationFeedOutput) []interface{} {
+	track := []interface{}{}
+	likes := make(map[string][]NotificationActor)
+	follows := []NotificationActor{}
 
 	for _, r := range inActivities.Results {
 		verb := r.Verb
-
 		if verb == "like" {
-			tmp := make(map[string][]string)
-
 			for _, activity := range r.Activities {
-				log.Printf("like activity: %+v\n", activity)
-
 				// who did this verb?
 				bits := strings.Split(string(activity.Actor), ":")
 				actor, _ := validateUser(bits[1])
@@ -555,45 +553,52 @@ func parseNotificationFeed(inActivities *getstream.GetNotificationFeedOutput) ma
 					continue
 				}
 
-				// what's the URL of the photo?
 				photoUrl := activity.MetaData["photoUrl"]
-
-				// are we already tracking this photo url?
-				if _, ok := tmp[photoUrl]; !ok {
-					tmp[photoUrl] = []string{}
+				if _, ok := likes[photoUrl]; !ok {
+					likes[photoUrl] = []NotificationActor{}
 				}
-				tmp[photoUrl] = uniqueAppendString(tmp[photoUrl], actor.Email)
+				likes[photoUrl] = append(likes[photoUrl], NotificationActor{
+					AuthorEmail: actor.Email,
+					AuthorName: actor.Username,
+				})
 			}
-			track[verb] = tmp
-		} else if verb == "follow" || verb == "unfollow" {
-			tmp := []string{}
-
+		} else if verb == "follow" {
 			for _, activity := range r.Activities {
-				log.Printf("follow/unfollow activity: %+v\n", activity)
-
 				// who did this verb?
 				bits := strings.Split(string(activity.Actor), ":")
 				actor, _ := validateUser(bits[1])
 				if actor.ID <= 0 {
 					continue
 				}
-				tmp = uniqueAppendString(tmp, actor.Email)
+				follows = append(follows, NotificationActor{
+					AuthorEmail: actor.Email,
+					AuthorName: actor.Username,
+				})
 			}
-			track[verb] = tmp
 		}
 	}
+
+	keys := make([]string, len(likes))
+
+	i := 0
+	for k := range likes {
+		keys[i] = k
+		i++
+	}
+	for _, photo_url := range keys {
+		payload := NotificationLike{
+			PhotoURL: photo_url,
+			Actors: likes[photo_url],
+		}
+		track = append(track, map[string]interface{}{"verb": "like", "payload": payload})
+	}
+
+	tmpFollows := map[string]interface{}{"verb": "follow", "payload": follows}
+	track = append(track, tmpFollows)
 
 	return track
 }
 
-func uniqueAppendString(slice []string, newString string) []string {
-	for _, ele := range slice {
-		if ele == newString {
-			return slice
-		}
-	}
-	return append(slice, newString)
-}
 /* best practice:
    my 'timeline' feed follows someone else's 'user' feed
  */
@@ -1183,6 +1188,7 @@ func getUsers(c *gin.Context) {
 	var data []User
 	var users []UserItem
 
+	// who's asking for the list?
 	userUUID := c.Query("myUUID")
 	if userUUID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "user UUID not found"})
@@ -1231,7 +1237,7 @@ func getPhotoLikes(c *gin.Context) {
 	var photo Photo;
 	var count int = 0;
 
-	photoUUID := c.Query("uuid")
+	photoUUID := c.Query("photoUUID")
 	photo, err := validatePhoto(photoUUID)
 	if err != nil {
 		if err.Error() == "not found" {
@@ -1322,7 +1328,7 @@ func getUserProfileStats(c *gin.Context) {
 func getMyLikes(c *gin.Context) {
 	var user User;
 
-	userUUID := c.Query("uuid")
+	userUUID := c.Query("myUUID")
 	user, err := validateUser(userUUID)
 	if err != nil {
 		if err.Error() == "not found" {
@@ -1360,7 +1366,7 @@ func getMyLikes(c *gin.Context) {
 func getMyFollows(c *gin.Context) {
 	var user User;
 
-	userUUID := c.Query("uuid")
+	userUUID := c.Query("myUUID")
 	user, err := validateUser(userUUID)
 	if err != nil {
 		if err.Error() == "not found" {
@@ -1397,7 +1403,7 @@ func fetchDoILikePhoto(myID uint, photoID uint) (bool, error) {
 	err := dbmap.SelectOne(&rowID, `
 		SELECT id
 		FROM likes
-		WHERE user_id=? AND photo_id=?`, myID, photoID)
+		WHERE UserID=? AND PhotoID=?`, myID, photoID)
 	if err != nil && err.Error() != "sql: no rows in result set" {
 		return false, err
 	}
@@ -1429,7 +1435,7 @@ func fetchDoIFollow(myID uint, userID uint) (bool, error) {
 
 func fetchPhotoLikes(photoID uint) (int, error) {
 	var count int = 0
-	err := dbmap.SelectOne(&count, "SELECT count(*) FROM likes WHERE photo_id=?", photoID)
+	err := dbmap.SelectOne(&count, "SELECT count(*) FROM likes WHERE PhotoID=?", photoID)
 	if err != nil {
 		return -1, err
 	}
@@ -1463,6 +1469,15 @@ func validatePhoto(photoUUID string) (Photo, error) {
 	}
 	return data, nil
 
+}
+
+func uniqueAppendString(slice []string, newString string) []string {
+	for _, ele := range slice {
+		if ele == newString {
+			return slice
+		}
+	}
+	return append(slice, newString)
 }
 
 //func validateRow(strUUID string, table string, kind string) (interface{}, error) {
