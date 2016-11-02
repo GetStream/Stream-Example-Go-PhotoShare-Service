@@ -40,9 +40,9 @@ type User struct {
 
 type Likes struct {
 	gorm.Model
-	UserID uint
+	UserID  uint
 	PhotoID uint
-	FeedID string
+	FeedID  string
 }
 
 type UserItem struct {
@@ -89,9 +89,8 @@ type NotificationActor struct {
 	AuthorName  string `json:"author_name"`
 }
 type NotificationFeedItem struct {
-	Photo      string `json:"photo"`
+	Photo  string `json:"photo"`
 	Actors []NotificationActor `json:"actors"`
-	Verb      string `json:"verb"`
 }
 
 var dbmap = initDb()
@@ -354,8 +353,7 @@ func parseFlatFeed(me User, inActivities []*getstream.Activity) []FeedItem {
 	var doILikePhoto bool = false
 
 	for _, activity := range inActivities {
-		log.Println("------------------\nactivity ID:", activity.ID)
-		fmt.Println("%+v", activity)
+		fmt.Printf("%+v\n", activity)
 		log.Println("activity ForeignID:", activity.ForeignID)
 		bits := strings.Split(string(activity.Actor), ":")
 		actorUUID := bits[1]
@@ -538,19 +536,64 @@ lastActivityUUID string,
 		"feed": activities,
 	}
 }
-func parseNotificationFeed(inActivities *getstream.GetNotificationFeedOutput) []NotificationFeedItem {
-	activities := []NotificationFeedItem{}
+func parseNotificationFeed(inActivities *getstream.GetNotificationFeedOutput) map[string]interface{} {
+	track := make(map[string]interface{})
 
-	var track map[string]NotificationFeedItem
+	for _, r := range inActivities.Results {
+		verb := r.Verb
 
-	for _, activity := range inActivities.Results {
-		verb := activity.Verb
-		track[verb] =
+		if verb == "like" {
+			tmp := make(map[string][]string)
+
+			for _, activity := range r.Activities {
+				log.Printf("like activity: %+v\n", activity)
+
+				// who did this verb?
+				bits := strings.Split(string(activity.Actor), ":")
+				actor, _ := validateUser(bits[1])
+				if actor.ID <= 0 {
+					continue
+				}
+
+				// what's the URL of the photo?
+				photoUrl := activity.MetaData["photoUrl"]
+
+				// are we already tracking this photo url?
+				if _, ok := tmp[photoUrl]; !ok {
+					tmp[photoUrl] = []string{}
+				}
+				tmp[photoUrl] = uniqueAppendString(tmp[photoUrl], actor.Email)
+			}
+			track[verb] = tmp
+		} else if verb == "follow" || verb == "unfollow" {
+			tmp := []string{}
+
+			for _, activity := range r.Activities {
+				log.Printf("follow/unfollow activity: %+v\n", activity)
+
+				// who did this verb?
+				bits := strings.Split(string(activity.Actor), ":")
+				actor, _ := validateUser(bits[1])
+				if actor.ID <= 0 {
+					continue
+				}
+				tmp = uniqueAppendString(tmp, actor.Email)
+			}
+			track[verb] = tmp
+		}
 	}
 
-	return activities
+	return track
 }
 
+func uniqueAppendString(slice []string, newString string) []string {
+	for _, ele := range slice {
+		if ele == newString {
+			return slice
+		}
+	}
+	return append(slice, newString)
+}
 /* best practice:
    my 'timeline' feed follows someone else's 'user' feed
  */
@@ -592,7 +635,9 @@ func getFollow(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, err.Error())
 		return
 	}
-	_, err = dbmap.Exec(`INSERT INTO follows (user_id_1, user_id_2) VALUES (?, ?)`, me.ID, target.ID)
+
+	foreignIdUUID := uuid.New()
+	_, err = dbmap.Exec(`INSERT INTO follows (user_id_1, user_id_2, uuid) VALUES (?, ?, ?)`, me.ID, target.ID, foreignIdUUID)
 	if err != nil {
 		log.Println("sending error after insert")
 		c.JSON(http.StatusBadRequest, gin.H{"errors": err.Error()})
@@ -627,6 +672,26 @@ func getFollow(c *gin.Context) {
 	myAggFeed.FollowFeedWithCopyLimit(targetFeed, 50)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	targetNotFeed, err := StreamClient.NotificationFeed("notification", targetUUID)
+	if err != nil {
+		log.Println("couldn't connect to notification feed:", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	now := time.Now()
+	_, err = targetNotFeed.AddActivity(&getstream.Activity{
+		Verb:      "follow",
+		ForeignID: foreignIdUUID,
+		TimeStamp: &now,
+		Object:    getstream.FeedID(fmt.Sprintf("user:%s", targetUUID)),
+		Actor:     getstream.FeedID(fmt.Sprintf("user:%s", myUUID)),
+	})
+	if err != nil {
+		log.Println("couldn't add follow activity to notification feed", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"errors": err.Error()})
 		return
 	}
 
@@ -697,6 +762,26 @@ func getUnfollow(c *gin.Context) {
 		return
 	}
 
+	targetNotFeed, err := StreamClient.NotificationFeed("notification", targetUUID)
+	if err != nil {
+		log.Println("couldn't connect to notification feed")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	var foreign_uuid string
+	err = dbmap.SelectOne(&foreign_uuid, `SELECT uuid FROM follows WHERE user_id_1=? AND user_id_2=?`, me.ID, target.ID)
+	if err != nil && err.Error() != "sql: no rows in result set" {
+		log.Println("select * from likes", err.Error())
+		c.JSON(http.StatusInternalServerError, err.Error())
+		return
+	} else {
+		err = targetNotFeed.RemoveActivityByForeignID(&getstream.Activity{ForeignID: foreign_uuid})
+		if err != nil {
+			log.Println("removing activity from stream failed:", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"errors": err.Error()})
+			return
+		}
+	}
 	dbmap.Exec("DELETE FROM follows WHERE user_id_1=? AND user_id_2=?", me.ID, target.ID)
 
 	c.JSON(http.StatusOK, gin.H{"status": "success"})
@@ -748,7 +833,6 @@ func getLikePhoto(c *gin.Context) {
 	}
 
 	now := time.Now()
-
 	activity, err := targetFeed.AddActivity(&getstream.Activity{
 		Verb:      "like",
 		ForeignID: photo.UUID,
@@ -764,7 +848,6 @@ func getLikePhoto(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"errors": err.Error()})
 		return
 	}
-	log.Printf("outgoing activity\n%+v\n", activity)
 
 	_, err = dbmap.Exec(`INSERT INTO likes (UserID, PhotoID, FeedID) VALUES (?, ?, ?)`,
 		user.ID, photo.ID, activity.ID)
@@ -829,8 +912,7 @@ func getUnlikePhoto(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, err.Error())
 		return
 	} else {
-		log.Printf("\n\n\nlike from db: %+v\n\n\n", like)
-		err = targetFeed.RemoveActivity(&getstream.Activity{ID: like.FeedID})
+		err = targetFeed.RemoveActivityByForeignID(&getstream.Activity{ID: like.FeedID})
 		if err != nil {
 			log.Println("removing activity from stream failed:", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"errors": err.Error()})

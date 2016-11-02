@@ -33,7 +33,8 @@ CREATE TABLE follows
 (
   id INT(11) PRIMARY KEY NOT NULL AUTO_INCREMENT,
   user_id_1 INT(11),
-  user_id_2 INT(11)
+  user_id_2 INT(11),
+  uuid varchar(40)
 );
 INSERT INTO follows (user_id_1, user_id_2) VALUES (1, 2);
 
