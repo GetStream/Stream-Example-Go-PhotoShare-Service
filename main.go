@@ -330,7 +330,7 @@ lastActivityUUID string,
 
 	feedActivities, err := streamFeed.Activities(&options)
 
-	activities = parseFlatFeed(me, feedActivities.Activities)
+	activities = parseFlatFeed(me, feedSlug, feedActivities.Activities)
 	newestActivityUUID = ""
 	if len(activities) > 0 {
 		newestActivityUUID = activities[0].ID
@@ -348,7 +348,7 @@ lastActivityUUID string,
 		"feed": activities,
 	}
 }
-func parseFlatFeed(me User, inActivities []*getstream.Activity) []FeedItem {
+func parseFlatFeed(me User, feedSlug string, inActivities []*getstream.Activity) []FeedItem {
 	var activities []FeedItem
 	var doIFollowUser bool = false
 	var doILikePhoto bool = false
@@ -369,6 +369,9 @@ func parseFlatFeed(me User, inActivities []*getstream.Activity) []FeedItem {
 			if err != nil {
 				log.Println("fetchDoIFollow error:", err)
 			}
+		} else if feedSlug == "timeline" {
+			// you'd only be seeing this in your timeline if you're following them
+			doIFollowUser = true;
 		}
 
 		photo, err := validatePhoto(activity.ForeignID)
