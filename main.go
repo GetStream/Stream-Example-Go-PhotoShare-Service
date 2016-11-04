@@ -192,7 +192,7 @@ func main() {
 
 	// get global feed, myUUID is optional
 	http://localhost:3000/feed/user/global?myUUID=
-	http://localhost:3000/feed/user/global?uuid=9cf34d34-a042-4231-babc-eee6ba67bd18
+	http://localhost:3000/feed/user/global?myUUID=9cf34d34-a042-4231-babc-eee6ba67bd18
 
 	// get one user's feed data (to see your own feed of items)
 	// sending myUUID for a different user will show whether you follow them or liked their photos
@@ -990,15 +990,15 @@ func postPhotoUpload(c *gin.Context) {
 	// create copy to be used inside the goroutine
 	cCp := c.Copy()
 	go func() {
-		var photoFilename string
+		//var photoFilename string
 
 		// shrink image
 		inImage, err := imaging.Open(localFilename)
 		if err != nil {
 			panic(err)
 		}
-		dstImage := imaging.Resize(inImage, 1024, 768, imaging.NearestNeighbor)
-		imaging.Save(dstImage, photoFilename)
+		dstImage := imaging.Fit(inImage, 1024, 768, imaging.NearestNeighbor)
+		imaging.Save(dstImage, localFilename)
 
 		// push to S3, get URL
 		log.Println("push to S3")
@@ -1229,7 +1229,7 @@ func getUsers(c *gin.Context) {
 }
 
 /*
-  http://localhost:3000/photolikes?uuid=3c7c77bd-e1b4-4e64-9c9d-fff223efc17b
+  http://localhost:3000/photolikes?myUUID=3c7c77bd-e1b4-4e64-9c9d-fff223efc17b
   returns count of likes for a photo's UUID
 	{"likes":23}
  */
@@ -1321,7 +1321,7 @@ func getUserProfileStats(c *gin.Context) {
 }
 
 /*
-  http://localhost:3000/mylikes?uuid=9cf34d34-a042-4231-babc-eee6ba67bd18
+  http://localhost:3000/mylikes?myUUID=9cf34d34-a042-4231-babc-eee6ba67bd18
   returns list of photo UUIDs you liked:
 	{"photos_liked":["3c7c77bd-e1b4-4e64-9c9d-fff223efc17b", "...", ...]}
  */
@@ -1359,7 +1359,7 @@ func getMyLikes(c *gin.Context) {
 }
 
 /*
-  http://localhost:3000/myfollows?uuid=9cf34d34-a042-4231-babc-eee6ba67bd18
+  http://localhost:3000/myfollows?myUUID=9cf34d34-a042-4231-babc-eee6ba67bd18
   returns list of user UUIDs you follow:
 	{"users_followed":["03a1cfed-3590-4aa8-a592-f78bc71ccfbd", "...", ...]}
  */
