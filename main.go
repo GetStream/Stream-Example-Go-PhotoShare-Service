@@ -20,7 +20,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
-	"github.com/aws/aws-sdk-go/aws/awsutil"
+	//"github.com/aws/aws-sdk-go/aws/awsutil"
 	"github.com/aws/aws-sdk-go/service/s3"
 	//"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/jinzhu/gorm"
@@ -199,7 +199,6 @@ func main() {
 	http://localhost:3000/feed/user/9cf34d34-a042-4231-babc-eee6ba67bd18?myUUID=9cf34d34-a042-4231-babc-eee6ba67bd18
 	*/
 	router.GET("/feed/notifications", func(c *gin.Context) {
-		log.Println("fetching my notifications")
 		var statusCode int
 		var payload gin.H
 
@@ -275,7 +274,7 @@ func main() {
 			"status": "OK",
 		})
 	})
-	log.Print("Listening on port 8080")
+	log.Print("Listening on port 3000")
 	router.Run("0.0.0.0:3000")
 }
 
@@ -311,7 +310,6 @@ lastActivityUUID string,
 			if err.Error() == "not found" {
 				return http.StatusNotFound, gin.H{"error": err.Error()}
 			} else {
-				log.Println(err.Error())
 				return http.StatusInternalServerError, gin.H{"error": err.Error()}
 			}
 		}
@@ -336,8 +334,6 @@ lastActivityUUID string,
 		newestActivityUUID = activities[0].ID
 	}
 
-	log.Println("returning activities")
-
 	if len(activities) == 0 {
 		activities = []FeedItem{}
 	}
@@ -354,8 +350,6 @@ func parseFlatFeed(me User, feedSlug string, inActivities []*getstream.Activity)
 	var doILikePhoto bool = false
 
 	for _, activity := range inActivities {
-		fmt.Printf("%+v\n", activity)
-		log.Println("activity ForeignID:", activity.ForeignID)
 		bits := strings.Split(string(activity.Actor), ":")
 		actorUUID := bits[1]
 		user, err := validateUser(actorUUID)
@@ -368,9 +362,10 @@ func parseFlatFeed(me User, feedSlug string, inActivities []*getstream.Activity)
 			doIFollowUser, err = fetchDoIFollow(me.ID, user.ID)
 			if err != nil {
 				log.Println("fetchDoIFollow error:", err)
+				// TODO deal with database error?
 			}
 		} else if feedSlug == "timeline" {
-			// you'd only be seeing this in your timeline if you're following them
+			// you'd only be seeing this in your timeline if you're following them, so we'll force true
 			doIFollowUser = true;
 		}
 
@@ -801,8 +796,6 @@ func getLikePhoto(c *gin.Context) {
 	myUUID := c.Query("myUUID")
 	photoUUID := c.Param("photoUUID")
 
-	log.Println("user", myUUID, "photo", photoUUID)
-
 	user, err := validateUser(myUUID)
 	if err != nil {
 		if err.Error() == "not found" {
@@ -824,6 +817,13 @@ func getLikePhoto(c *gin.Context) {
 			log.Println(err.Error())
 			c.JSON(http.StatusInternalServerError, err.Error())
 		}
+		return
+	}
+
+	var like Likes
+	dbmap.SelectOne(&like, `SELECT ID,FeedID FROM likes WHERE UserID=? AND PhotoID=? LIMIT 1`, user.ID, photo.ID)
+	if like.FeedID != "" {
+		c.JSON(http.StatusOK, gin.H{"status": "you already like this"})
 		return
 	}
 
@@ -874,8 +874,6 @@ func getUnlikePhoto(c *gin.Context) {
 	myUUID := c.Query("myUUID")
 	photoUUID := c.Param("photoUUID")
 
-	log.Println("user", myUUID, "photo", photoUUID)
-
 	user, err := validateUser(myUUID)
 	if err != nil {
 		if err.Error() == "not found" {
@@ -914,14 +912,14 @@ func getUnlikePhoto(c *gin.Context) {
 	}
 
 	var like Likes
-	err = dbmap.SelectOne(&like, `SELECT ID,FeedID FROM likes WHERE UserID=? AND PhotoID=?`, user.ID, photo.ID)
+	err = dbmap.SelectOne(&like, `SELECT ID,FeedID FROM likes WHERE UserID=? AND PhotoID=? LIMIT 1`, user.ID, photo.ID)
 	if err != nil && err.Error() != "sql: no rows in result set" {
 		log.Println("select * from likes", err.Error())
 		c.JSON(http.StatusInternalServerError, err.Error())
 		return
 	} else {
 		err = targetFeed.RemoveActivityByForeignID(&getstream.Activity{ID: like.FeedID})
-		if err != nil {
+		if err != nil && err.Error() != "no ForeignID" {
 			log.Println("removing activity from stream failed:", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"errors": err.Error()})
 			return
@@ -943,7 +941,6 @@ func postPhotoUpload(c *gin.Context) {
 	var me User
 
 	myUUID := c.PostForm("myUUID")
-	log.Println("myUUID", myUUID)
 	me, err := validateUser(myUUID)
 	if err != nil && err.Error() != "sql: no rows in result set" {
 		log.Println("594", err.Error())
@@ -955,8 +952,7 @@ func postPhotoUpload(c *gin.Context) {
 		return
 	}
 
-	file, header, err := c.Request.FormFile("upload")
-	log.Println(header.Filename)
+	file, _, err := c.Request.FormFile("upload")
 	localFilename := "./tmp/" + uuid.New() + ".png"
 	localSavedFile, err := os.Create(localFilename)
 	if err != nil {
@@ -990,8 +986,6 @@ func postPhotoUpload(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 	}
 
-	// create copy to be used inside the goroutine
-	cCp := c.Copy()
 	go func() {
 		//var photoFilename string
 
@@ -1004,7 +998,6 @@ func postPhotoUpload(c *gin.Context) {
 		imaging.Save(dstImage, localFilename)
 
 		// push to S3, get URL
-		log.Println("push to S3")
 		file, err := os.Open(localFilename)
 		if err != nil {
 			panic(err)
@@ -1013,13 +1006,11 @@ func postPhotoUpload(c *gin.Context) {
 
 		fileInfo, _ := file.Stat()
 		var size int64 = fileInfo.Size()
-		log.Println("file size", size)
 		buffer := make([]byte, size)
 		file.Read(buffer)
 		fileBytes := bytes.NewReader(buffer) // convert to io.ReadSeeker type
 		fileType := http.DetectContentType(buffer)
 		path := "photos/" + path.Base(file.Name())
-		log.Println("s3.PutObjectInput")
 		params := &s3.PutObjectInput{
 			Bucket:        aws.String(S3BucketName), // required
 			Key:           aws.String(path), // required
@@ -1032,15 +1023,12 @@ func postPhotoUpload(c *gin.Context) {
 			},
 			// see more at http://godoc.org/github.com/aws/aws-sdk-go/service/s3#S3.PutObject
 		}
-		log.Println(params)
-		log.Println("s3.PutObject")
-		result, err := S3Client.PutObject(params)
+		_, err = S3Client.PutObject(params)
 		if err != nil {
 			if awsErr, ok := err.(awserr.Error); ok {
 				log.Println(awsErr.Code(), awsErr.Message(), awsErr.OrigErr())
 				if reqErr, ok := err.(awserr.RequestFailure); ok {
 					// A service error occurred
-					log.Println(reqErr.Code(), reqErr.Message(), reqErr.StatusCode(), reqErr.RequestID())
 					log.Println(reqErr.Code(), reqErr.Message(), reqErr.StatusCode(), reqErr.RequestID())
 				}
 			} else {
@@ -1049,11 +1037,8 @@ func postPhotoUpload(c *gin.Context) {
 				log.Println("s3.PutObject err:", err.Error())
 			}
 		}
-		log.Println("s3.PutObject finished")
-		log.Println(awsutil.StringValue(result))
-		// we need to get the S3 URL from that result somehow
-		photo.URL = "https://android-demo.s3.amazonaws.com/" + path
 
+		photo.URL = "https://android-demo.s3.amazonaws.com/" + path
 		_, err = dbmap.Exec(`
 			UPDATE photos SET URL=?, UpdatedAt=? WHERE ID=?`,
 			photo.URL, time.Now(), photo_id)
@@ -1088,8 +1073,6 @@ func postPhotoUpload(c *gin.Context) {
 				fmt.Println(err)
 			}
 		}
-		// note that you are using the copied context "cCp", IMPORTANT
-		log.Println("Done! in path " + cCp.Request.URL.Path)
 	}()
 }
 
@@ -1103,7 +1086,6 @@ func postRegister(c *gin.Context) {
 
 	email := c.PostForm("email")
 	username := c.PostForm("username")
-	log.Println(email, username)
 
 	if username == "" || email == "" {
 		if username == "" {
@@ -1114,8 +1096,6 @@ func postRegister(c *gin.Context) {
 		}
 	} else {
 		var user User
-		log.Println("username:", username)
-		log.Println("email:", email)
 		err := dbmap.SelectOne(&user, "SELECT * FROM users WHERE username=? AND email=?",
 			strings.ToLower(username),
 			strings.ToLower(email))
@@ -1157,7 +1137,6 @@ func postRegister(c *gin.Context) {
 		return
 	}
 
-	log.Println("saving new user in db")
 	user.Username = username
 	user.Email = email
 	user.UUID = uuid.New()
@@ -1179,7 +1158,6 @@ func postRegister(c *gin.Context) {
 		log.Println("sending error response from insert")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 	}
-	log.Println("ended up here, no response to send back")
 }
 
 /*
@@ -1193,11 +1171,6 @@ func getUsers(c *gin.Context) {
 
 	// who's asking for the list?
 	userUUID := c.Query("myUUID")
-	if userUUID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "user UUID not found"})
-		return
-	}
-	log.Println("who's asking for the user list:", userUUID)
 	user, err := validateUser(userUUID)
 	if err != nil {
 		if err.Error() == "not found" {
@@ -1226,8 +1199,8 @@ func getUsers(c *gin.Context) {
 		}
 		users = append(users, userItem)
 	}
-	c.JSON(http.StatusOK, gin.H{"users": users})
 
+	c.JSON(http.StatusOK, gin.H{"users": users})
 	return
 }
 
@@ -1418,21 +1391,17 @@ func fetchDoILikePhoto(myID uint, photoID uint) (bool, error) {
 
 func fetchDoIFollow(myID uint, userID uint) (bool, error) {
 	var rowID int = 0
-	log.Println("fetchDoIFollow ids:", myID, userID)
 
 	err := dbmap.SelectOne(&rowID, `
 		SELECT id
 		FROM follows
 		WHERE user_id_1=? AND user_id_2=?`, myID, userID)
 	if err != nil && err.Error() != "sql: no rows in result set" {
-		log.Println("fetchDoIFollow 1")
 		return false, err
 	}
 	if rowID > 0 {
-		log.Println("fetchDoIFollow 2")
 		return true, nil
 	}
-	log.Println("fetchDoIFollow 3")
 	return false, nil
 }
 
@@ -1448,6 +1417,9 @@ func fetchPhotoLikes(photoID uint) (int, error) {
 func validateUser(userUUID string) (User, error) {
 	//return validateRow(userUUID, "users", "User")
 	var data User
+	if userUUID == "" {
+		return data, errors.New("user UUID not set")
+	}
 	err := dbmap.SelectOne(&data, "SELECT * FROM users WHERE UUID=?", userUUID)
 	if err != nil {
 		if err.Error() == "sql: no rows in result set" {
@@ -1462,6 +1434,9 @@ func validateUser(userUUID string) (User, error) {
 func validatePhoto(photoUUID string) (Photo, error) {
 	//return validateRow(photoUUID, "photos", "Photo")
 	var data Photo
+	if photoUUID == "" {
+		return data, errors.New("user UUID not set")
+	}
 	err := dbmap.SelectOne(&data, "SELECT * FROM photos WHERE UUID=?", photoUUID)
 	if err != nil {
 		if err.Error() == "sql: no rows in result set" {
