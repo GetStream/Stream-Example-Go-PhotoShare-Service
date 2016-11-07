@@ -74,14 +74,14 @@ type FeedItem struct {
 	DoIFollow   bool `json:"doifollow"`
 	Likes       int `json:"likes"`
 	ILikeThis   bool `json:"ilikethis"`
-	CreatedDate string `json:"created_date"`
+	CreatedDate int64 `json:"created_date"`
 }
 type AggregatedFeedItem struct {
 	AuthorEmail string `json:"author_email"`
 	AuthorName  string `json:"author_name"`
 	AuthorID    string `json:"author_id"`
 	Photos      []string `json:"photos"`
-	CreatedDate string `json:"created_date"`
+	CreatedDate int64 `json:"created_date"`
 }
 
 type NotificationActor struct {
@@ -393,8 +393,9 @@ func parseFlatFeed(me User, feedSlug string, inActivities []*getstream.Activity)
 			PhotoURL: activity.MetaData["photoUrl"],
 			PhotoUUID: photo.UUID,
 			ID: activity.ForeignID,
-			CreatedDate: activity.TimeStamp.Format("2006-01-02T15:04:05.999999"),
+			CreatedDate: activity.TimeStamp.Unix(),
 		})
+		log.Println(activities)
 	}
 
 	return activities
@@ -472,8 +473,15 @@ func parseAggregatedFeed(inActivities *getstream.GetAggregatedFeedOutput) []Aggr
 			continue
 		}
 
+		value := result.CreatedAt
+		layout := "2006-01-02T15:04:05.999999"
+		t, err := time.Parse(layout, value)
+		if err != nil {
+			log.Println(err)
+		}
+
 		aggActivity := AggregatedFeedItem{
-			CreatedDate: result.CreatedAt,
+			CreatedDate: t.Unix(),
 			AuthorEmail: actor.Email,
 			AuthorName: actor.Username,
 			AuthorID: actor.UUID,
