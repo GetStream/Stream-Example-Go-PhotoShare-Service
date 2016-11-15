@@ -33,16 +33,16 @@ import (
 
 type User struct {
 	gorm.Model
-	UUID     string `gorm:"column:uuid" json:"uuid"`
-	Username string `gorm:"column:username" json:"username"`
-	Email    string `gorm:"column:email" json:"email"`
+	UUID     string `json:"uuid"`
+	Username string `json:"username"`
+	Email    string `json:"email"`
 }
 
 type Likes struct {
 	gorm.Model
 	UserID  uint
 	PhotoID uint
-	FeedID  string
+	UUID    string `json:"uuid"`
 }
 
 type UserItem struct {
@@ -54,10 +54,16 @@ type UserItem struct {
 
 type Photo struct {
 	gorm.Model
-	UserID uint  `gorm:"column:user_id,index" json:"user_id"`
-	UUID   string `gorm:"column:uuid" json:"uuid"`
-	URL    string `gorm:"column:url" json:"url"`
-	Likes  int `gorm:"column:likes" json:"likes"`
+	UserID uint  `json:"user_id"`
+	UUID   string `json:"uuid"`
+	URL    string `json:"url"`
+	Likes  int `json:"likes"`
+}
+type Follows struct {
+	gorm.Model
+	UserID1 uint  `json:"user_id_1"`
+	UserID2 uint  `json:"user_id_2"`
+	UUID    string `json:"uuid"`
 }
 
 var router *gin.Engine
@@ -105,6 +111,7 @@ func initDb() *gorp.DbMap {
 	dbmap.AddTableWithName(User{}, "users").SetKeys(true, "ID")
 	dbmap.AddTableWithName(Photo{}, "photos").SetKeys(true, "ID")
 	dbmap.AddTableWithName(Likes{}, "likes").SetKeys(true, "ID")
+	dbmap.AddTableWithName(Follows{}, "follows").SetKeys(true, "ID")
 	err = dbmap.CreateTablesIfNotExists()
 	if err != nil {
 		panic("failed to create tables: " + err.Error())
@@ -145,9 +152,7 @@ func initStream() *getstream.Client {
 }
 
 func main() {
-	// S3
-	//Endpoint:         "s3.amazonaws.com"
-	//S3ForcePathStyle: true
+	// set up S3
 	S3Client = s3.New(session.New(&aws.Config{Region: aws.String("us-east-1")}))
 
 	// gin routing
@@ -168,15 +173,10 @@ func main() {
 		// redirect to the repo, blog post, etc.
 		c.HTML(http.StatusOK, "healthcheck.html", gin.H{})
 	})
-	router.Static("/privacy", "privacy.html")
-	router.Static("/termsofservice", "termsofservice.html")
 
 	router.POST("/register", postRegister) // also does login
 
 	router.GET("/users", getUsers)
-	router.GET("/photolikes", getPhotoLikes)
-	router.GET("/mylikes", getMyLikes)
-	router.GET("/myfollows", getMyFollows)
 	router.GET("/follow/:targetUUID", getFollow)
 	router.GET("/unfollow/:targetUUID", getUnfollow)
 	router.GET("/likephoto/:photoUUID", getLikePhoto)
@@ -268,8 +268,6 @@ func main() {
 	// no more custom code under here
 	//router.Static("/", "index.html")
 	router.GET("/", func(c *gin.Context) {
-		// redirect to the repo, blog post, etc.
-		//c.Redirect(http.StatusTemporaryRedirect, "//getstream.io/blog")
 		c.JSON(http.StatusOK, gin.H{
 			"status": "OK",
 		})
@@ -599,8 +597,11 @@ func parseNotificationFeed(inActivities *getstream.GetNotificationFeedOutput) []
 		track = append(track, map[string]interface{}{"verb": "like", "payload": payload})
 	}
 
-	tmpFollows := map[string]interface{}{"verb": "follow", "payload": follows}
-	track = append(track, tmpFollows)
+	tmpFollows := map[string]interface{}{}
+	if len(follows) > 0 {
+		tmpFollows = map[string]interface{}{"verb": "follow", "payload": follows}
+		track = append(track, tmpFollows)
+	}
 
 	return track
 }
@@ -640,15 +641,15 @@ func getFollow(c *gin.Context) {
 		}
 	}
 
-	err = dbmap.SelectOne(&follow_id, "SELECT id FROM follows WHERE user_id_1=? AND user_id_2=?", me.ID, target.ID)
+	err = dbmap.SelectOne(&follow_id, "SELECT id FROM follows WHERE UserID1=? AND UserID2=?", me.ID, target.ID)
 	if err != nil && err.Error() != "sql: no rows in result set" {
 		log.Println(err.Error())
 		c.JSON(http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	foreignIdUUID := uuid.New()
-	_, err = dbmap.Exec(`INSERT INTO follows (user_id_1, user_id_2, uuid) VALUES (?, ?, ?)`, me.ID, target.ID, foreignIdUUID)
+	var followUUID string = uuid.New()
+	_, err = dbmap.Exec(`INSERT INTO follows (UserID1, UserID2, UUID) VALUES (?, ?, ?)`, me.ID, target.ID, followUUID)
 	if err != nil {
 		log.Println("sending error after insert")
 		c.JSON(http.StatusBadRequest, gin.H{"errors": err.Error()})
@@ -695,7 +696,7 @@ func getFollow(c *gin.Context) {
 	now := time.Now()
 	_, err = targetNotFeed.AddActivity(&getstream.Activity{
 		Verb:      "follow",
-		ForeignID: foreignIdUUID,
+		ForeignID: followUUID,
 		TimeStamp: &now,
 		Object:    getstream.FeedID(fmt.Sprintf("user:%s", targetUUID)),
 		Actor:     getstream.FeedID(fmt.Sprintf("user:%s", myUUID)),
@@ -780,9 +781,9 @@ func getUnfollow(c *gin.Context) {
 		return
 	}
 	var foreign_uuid string
-	err = dbmap.SelectOne(&foreign_uuid, `SELECT uuid FROM follows WHERE user_id_1=? AND user_id_2=?`, me.ID, target.ID)
+	err = dbmap.SelectOne(&foreign_uuid, `SELECT uuid FROM follows WHERE UserID1=? AND UserID2=?`, me.ID, target.ID)
 	if err != nil && err.Error() != "sql: no rows in result set" {
-		log.Println("select * from likes", err.Error())
+		log.Println("select uuid from follows", err.Error())
 		c.JSON(http.StatusInternalServerError, err.Error())
 		return
 	} else {
@@ -793,7 +794,7 @@ func getUnfollow(c *gin.Context) {
 			return
 		}
 	}
-	dbmap.Exec("DELETE FROM follows WHERE user_id_1=? AND user_id_2=?", me.ID, target.ID)
+	dbmap.Exec("DELETE FROM follows WHERE UserID1=? AND UserID2=?", me.ID, target.ID)
 
 	c.JSON(http.StatusOK, gin.H{"status": "success"})
 }
@@ -829,8 +830,8 @@ func getLikePhoto(c *gin.Context) {
 	}
 
 	var like Likes
-	dbmap.SelectOne(&like, `SELECT ID,FeedID FROM likes WHERE UserID=? AND PhotoID=? LIMIT 1`, user.ID, photo.ID)
-	if like.FeedID != "" {
+	dbmap.SelectOne(&like, `SELECT ID,UUID,UserID,PhotoID FROM likes WHERE UserID=? AND PhotoID=? LIMIT 1`, user.ID, photo.ID)
+	if like.ID > 0 {
 		c.JSON(http.StatusOK, gin.H{"status": "you already like this"})
 		return
 	}
@@ -849,9 +850,24 @@ func getLikePhoto(c *gin.Context) {
 	}
 
 	now := time.Now()
-	activity, err := targetFeed.AddActivity(&getstream.Activity{
+	var likeUUID string = uuid.New()
+	likeDBPayload, err := dbmap.Exec(`INSERT INTO likes (UserID, PhotoID, UUID, CreatedAt) VALUES (?, ?, ?, ?)`,
+		user.ID, photo.ID, likeUUID, now)
+	if err != nil {
+		log.Println("sending error after insert")
+		c.JSON(http.StatusInternalServerError, gin.H{"errors": err.Error()})
+		return
+	}
+	likeID, err := likeDBPayload.LastInsertId()
+	if err != nil {
+		log.Println("sending error response from insert")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	_, err = targetFeed.AddActivity(&getstream.Activity{
 		Verb:      "like",
-		ForeignID: photo.UUID,
+		ForeignID: likeUUID,
 		TimeStamp: &now,
 		Object:    getstream.FeedID(fmt.Sprintf("photo:%s", photo.UUID)),
 		Actor:     getstream.FeedID(fmt.Sprintf("user:%s", myUUID)),
@@ -862,14 +878,8 @@ func getLikePhoto(c *gin.Context) {
 	if err != nil {
 		log.Println("couldn't add activity to notification feed", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"errors": err.Error()})
-		return
-	}
 
-	_, err = dbmap.Exec(`INSERT INTO likes (UserID, PhotoID, FeedID) VALUES (?, ?, ?)`,
-		user.ID, photo.ID, activity.ID)
-	if err != nil {
-		log.Println("sending error after insert")
-		c.JSON(http.StatusInternalServerError, gin.H{"errors": err.Error()})
+		dbmap.Exec("DELETE FROM likes WHERE ID=?", likeID)
 		return
 	}
 
@@ -920,13 +930,13 @@ func getUnlikePhoto(c *gin.Context) {
 	}
 
 	var like Likes
-	err = dbmap.SelectOne(&like, `SELECT ID,FeedID FROM likes WHERE UserID=? AND PhotoID=? LIMIT 1`, user.ID, photo.ID)
+	err = dbmap.SelectOne(&like, `SELECT ID,UUID FROM likes WHERE UserID=? AND PhotoID=? LIMIT 1`, user.ID, photo.ID)
 	if err != nil && err.Error() != "sql: no rows in result set" {
 		log.Println("select * from likes", err.Error())
 		c.JSON(http.StatusInternalServerError, err.Error())
 		return
 	} else {
-		err = targetFeed.RemoveActivityByForeignID(&getstream.Activity{ID: like.FeedID})
+		err = targetFeed.RemoveActivityByForeignID(&getstream.Activity{ID: like.UUID})
 		if err != nil && err.Error() != "no ForeignID" {
 			log.Println("removing activity from stream failed:", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"errors": err.Error()})
@@ -1046,17 +1056,17 @@ func postPhotoUpload(c *gin.Context) {
 			}
 		}
 
+		now := time.Now()
 		photo.URL = "https://android-demo.s3.amazonaws.com/" + path
 		_, err = dbmap.Exec(`
 			UPDATE photos SET URL=?, UpdatedAt=? WHERE ID=?`,
-			photo.URL, time.Now(), photo_id)
+			photo.URL, now, photo_id)
 		if err != nil {
 			log.Println("sending error after photo insert")
 			c.JSON(http.StatusBadRequest, gin.H{"errors": err.Error()})
 			return
 		}
 
-		now := time.Now()
 		globalFeed, err := StreamClient.FlatFeed("user", "global")
 		if err != nil {
 			log.Println(err)
@@ -1213,38 +1223,6 @@ func getUsers(c *gin.Context) {
 }
 
 /*
-  http://localhost:3000/photolikes?myUUID=3c7c77bd-e1b4-4e64-9c9d-fff223efc17b
-  returns count of likes for a photo's UUID
-	{"likes":23}
- */
-func getPhotoLikes(c *gin.Context) {
-	var photo Photo;
-	var count int = 0;
-
-	photoUUID := c.Query("photoUUID")
-	photo, err := validatePhoto(photoUUID)
-	if err != nil {
-		if err.Error() == "not found" {
-			c.JSON(http.StatusNotFound, err.Error())
-		} else {
-			log.Println(err.Error())
-			c.JSON(http.StatusInternalServerError, err.Error())
-		}
-		return
-	}
-
-	count, err = fetchPhotoLikes(photo.ID)
-	if err != nil && err.Error() != "sql: no rows in result set" {
-		log.Println(err.Error())
-		c.JSON(http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"likes": count})
-	return
-}
-
-/*
   http://localhost:3000/profilestats/9cf34d34-a042-4231-babc-eee6ba67bd18
   returns stats for a user
   {
@@ -1272,7 +1250,7 @@ func getUserProfileStats(c *gin.Context) {
 	}
 
 	var followerCount int = 0
-	err = dbmap.SelectOne(&followerCount, "SELECT count(*) FROM follows WHERE user_id_2=?", me.ID)
+	err = dbmap.SelectOne(&followerCount, "SELECT count(*) FROM follows WHERE UserID2=?", me.ID)
 	if err != nil && err.Error() != "sql: no rows in result set" {
 		log.Println(err.Error())
 		c.JSON(http.StatusInternalServerError, err.Error())
@@ -1280,7 +1258,7 @@ func getUserProfileStats(c *gin.Context) {
 	}
 
 	var followingCount int = 0
-	err = dbmap.SelectOne(&followingCount, "SELECT count(*) FROM follows WHERE user_id_1=?", me.ID)
+	err = dbmap.SelectOne(&followingCount, "SELECT count(*) FROM follows WHERE UserID1=?", me.ID)
 	if err != nil && err.Error() != "sql: no rows in result set" {
 		log.Println(err.Error())
 		c.JSON(http.StatusInternalServerError, err.Error())
@@ -1302,82 +1280,6 @@ func getUserProfileStats(c *gin.Context) {
 		"email": me.Email,
 		"username": me.Username,
 	})
-}
-
-/*
-  http://localhost:3000/mylikes?myUUID=9cf34d34-a042-4231-babc-eee6ba67bd18
-  returns list of photo UUIDs you liked:
-	{"photos_liked":["3c7c77bd-e1b4-4e64-9c9d-fff223efc17b", "...", ...]}
- */
-func getMyLikes(c *gin.Context) {
-	var user User;
-
-	userUUID := c.Query("myUUID")
-	user, err := validateUser(userUUID)
-	if err != nil {
-		if err.Error() == "not found" {
-			c.JSON(http.StatusNotFound, gin.H{"error": "user UUID" + err.Error()})
-		} else {
-			log.Println(err.Error())
-			c.JSON(http.StatusInternalServerError, err.Error())
-		}
-		return
-	}
-
-	photo_likes := []string{}
-
-	_, err = dbmap.Select(&photo_likes, `
-		SELECT p.UUID
-		FROM photos p
-		  JOIN likes on p.ID=likes.photo_id
-		WHERE likes.user_id=?`, user.ID)
-	if err != nil && err.Error() != "sql: no rows in result set" {
-		log.Println(err.Error())
-		c.JSON(http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"photos_liked": photo_likes})
-
-	return
-}
-
-/*
-  http://localhost:3000/myfollows?myUUID=9cf34d34-a042-4231-babc-eee6ba67bd18
-  returns list of user UUIDs you follow:
-	{"users_followed":["03a1cfed-3590-4aa8-a592-f78bc71ccfbd", "...", ...]}
- */
-func getMyFollows(c *gin.Context) {
-	var user User;
-
-	userUUID := c.Query("myUUID")
-	user, err := validateUser(userUUID)
-	if err != nil {
-		if err.Error() == "not found" {
-			c.JSON(http.StatusNotFound, err.Error())
-		} else {
-			log.Println(err.Error())
-			c.JSON(http.StatusInternalServerError, err.Error())
-		}
-		return
-	}
-
-	follows := []string{}
-
-	_, err = dbmap.Select(&follows, `
-		SELECT u.UUID
-		FROM users u
-		  JOIN follows f ON f.user_id_2=u.ID
-		WHERE f.user_id_1=?`, user.ID)
-	if err != nil && err.Error() != "sql: no rows in result set" {
-		log.Println(err.Error())
-		c.JSON(http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"users_followed": follows})
-
-	return
 }
 
 /* helper functions */
@@ -1403,7 +1305,7 @@ func fetchDoIFollow(myID uint, userID uint) (bool, error) {
 	err := dbmap.SelectOne(&rowID, `
 		SELECT id
 		FROM follows
-		WHERE user_id_1=? AND user_id_2=?`, myID, userID)
+		WHERE UserID1=? AND UserID2=?`, myID, userID)
 	if err != nil && err.Error() != "sql: no rows in result set" {
 		return false, err
 	}
@@ -1423,7 +1325,6 @@ func fetchPhotoLikes(photoID uint) (int, error) {
 }
 
 func validateUser(userUUID string) (User, error) {
-	//return validateRow(userUUID, "users", "User")
 	var data User
 	if userUUID == "" {
 		return data, errors.New("user UUID not set")
@@ -1440,7 +1341,6 @@ func validateUser(userUUID string) (User, error) {
 }
 
 func validatePhoto(photoUUID string) (Photo, error) {
-	//return validateRow(photoUUID, "photos", "Photo")
 	var data Photo
 	if photoUUID == "" {
 		return data, errors.New("user UUID not set")
@@ -1454,36 +1354,28 @@ func validatePhoto(photoUUID string) (Photo, error) {
 		return data, err
 	}
 	return data, nil
-
 }
 
-func uniqueAppendString(slice []string, newString string) []string {
-	for _, ele := range slice {
-		if ele == newString {
-			return slice
-		}
-	}
-	return append(slice, newString)
-}
+//func uniqueAppendString(slice []string, newString string) []string {
+//	for _, ele := range slice {
+//		if ele == newString {
+//			return slice
+//		}
+//	}
+//	return append(slice, newString)
+//}
 
-//func validateRow(strUUID string, table string, kind string) (interface{}, error) {
-//	var whatKind *interface{}
+//func validateRow(strUUID string, table string, kind *interface{}) (error) {
 //	if strUUID == "" {
-//		return nil, errors.New("not found")
-//	}
-//	if kind == "User" {
-//		whatKind = &User{}
-//	}
-//	if kind == "Photo" {
-//		whatKind = &Photo{}
+//		return errors.New("not found")
 //	}
 //
-//	err := dbmap.SelectOne(whatKind, "SELECT * FROM " + table + " WHERE UUID=?", strUUID)
+//	err := dbmap.SelectOne(kind, "SELECT * FROM " + table + " WHERE UUID=?", strUUID)
 //	if err != nil {
 //		if err.Error() == "sql: no rows in result set" {
 //			err = errors.New("not found")
 //		}
-//		return nil, err
+//		return err
 //	}
-//	return kind, nil
+//	return nil
 //}
