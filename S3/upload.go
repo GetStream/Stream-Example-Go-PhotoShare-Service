@@ -94,8 +94,8 @@ func Upload(myUUID string, photo DB.Photo, localFilename string, photo_id int64)
 			ForeignID: photo.UUID,
 			TimeStamp: &now,
 			To:        []getstream.Feed{userFeed},
-			Object:    getstream.FeedID(fmt.Sprintf("photo:%s", photo.UUID)),
-			Actor:     getstream.FeedID(fmt.Sprintf("user:%s", myUUID)),
+			Object:    fmt.Sprintf("photo:%s", photo.UUID),
+			Actor:     fmt.Sprintf("user:%s", myUUID),
 			MetaData: map[string]string{
 				// add as many custom keys/values here as you like
 				"photoUrl": photo.URL,

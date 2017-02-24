@@ -406,8 +406,8 @@ func Follow(c *gin.Context) {
 		Verb:      "follow",
 		ForeignID: followUUID,
 		TimeStamp: &now,
-		Object:    getstream.FeedID(fmt.Sprintf("user:%s", targetUUID)),
-		Actor:     getstream.FeedID(fmt.Sprintf("user:%s", myUUID)),
+		Object:    fmt.Sprintf("user:%s", targetUUID),
+		Actor:     fmt.Sprintf("user:%s", myUUID),
 	})
 	if err != nil {
 		log.Println("couldn't add follow activity to notification feed", err)
@@ -507,7 +507,6 @@ func Unfollow(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "success"})
 }
 
-
 func LikePhoto(c *gin.Context) {
 	var targetUUID string
 
@@ -578,8 +577,8 @@ func LikePhoto(c *gin.Context) {
 		Verb:      "like",
 		ForeignID: likeUUID,
 		TimeStamp: &now,
-		Object:    getstream.FeedID(fmt.Sprintf("photo:%s", photo.UUID)),
-		Actor:     getstream.FeedID(fmt.Sprintf("user:%s", myUUID)),
+		Object:    fmt.Sprintf("photo:%s", photo.UUID),
+		Actor:     fmt.Sprintf("user:%s", myUUID),
 		MetaData: map[string]string{
 			"photoUrl": photo.URL,
 		},
