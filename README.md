@@ -1,3 +1,5 @@
+> **This repository is archived and no longer maintained.** For a current alternative, see [the Feeds v3 Go docs](https://getstream.io/activity-feeds/docs/go-golang/).
+
 ## Go backend for GetStream mobile app
 
 We built this project as an example of our "best practices" for building a photo-sharing mobile app like Instagram.
